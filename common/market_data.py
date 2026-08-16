@@ -106,13 +106,12 @@ def fetch_upstox_intraday_candles(symbol_or_key, start_dt, end_dt, access_token,
     return df
 
 def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, chain_cache=None, log_func=print):
-    log_func(f"🔍 [DEBUG OPTIONS] Starting leg resolution for {symbol} at {entry_time}")
     df_inst = get_instrument_df()
     if df_inst.empty: return []
     
     entry_date = pd.to_datetime(entry_time).date()
     current_date = pd.Timestamp.now(tz="Asia/Kolkata").date()
-    cache_key = f"{symbol}_{entry_date}"
+    cache_key = f"{symbol}_{entry_date}_{strategy}"
     
     if chain_cache is not None and cache_key in chain_cache:
         cached_data = chain_cache[cache_key]
@@ -126,37 +125,19 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
         headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
         
         spot_sym = symbol.upper()
-        
-        # 🚨 DEEP DEBUG: Print raw BSE_FO samples to find the hidden naming convention
-        if spot_sym == 'SENSEX':
-            bse_fo_sample = df_inst[df_inst['exchange'] == 'BSE_FO'].head(5)
-            log_func(f"🚨 [DEEP DEBUG] BSE_FO Sample Rows:")
-            for _, row in bse_fo_sample.iterrows():
-                u_sym = row.get('underlying_symbol', 'N/A')
-                log_func(f"   -> tradingsymbol: {row.get('tradingsymbol')}, name: {row.get('name')}, underlying: {u_sym}")
-        
-        # Try multiple SENSEX aliases
-        if spot_sym == 'NIFTY': search_syms = ['NIFTY 50', 'NIFTY']
-        elif spot_sym == 'BANKNIFTY': search_syms = ['NIFTY BANK', 'BANKNIFTY']
-        elif spot_sym == 'FINNIFTY': search_syms = ['NIFTY FIN SERVICE', 'FINNIFTY']
-        elif spot_sym == 'SENSEX': search_syms = ['SENSEX', 'BSX', 'BSE SENSEX']
-        elif spot_sym == 'BANKEX': search_syms = ['BANKEX', 'BKX']
-        else: search_syms = [spot_sym]
+        if spot_sym == 'NIFTY': spot_sym = 'NIFTY 50'
+        elif spot_sym == 'BANKNIFTY': spot_sym = 'NIFTY BANK'
+        elif spot_sym == 'FINNIFTY': spot_sym = 'NIFTY FIN SERVICE'
+        elif spot_sym == 'SENSEX': spot_sym = 'BSX'
+        elif spot_sym == 'BANKEX': spot_sym = 'BKX'
         
         valid_fo_exchanges = ['NSE_FO', 'BSE_FO']
-        opts_active = pd.DataFrame()
         
-        for s_sym in search_syms:
-            if 'underlying_symbol' in df_inst.columns:
-                temp_opts = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == s_sym)]
-            else:
-                temp_opts = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & ((df_inst['name'] == s_sym) | (df_inst['tradingsymbol'].str.startswith(s_sym)))]
+        if 'underlying_symbol' in df_inst.columns:
+            opts_active = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == spot_sym)]
+        else:
+            opts_active = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & ((df_inst['name'] == spot_sym) | (df_inst['tradingsymbol'].str.startswith(spot_sym)))]
             
-            if not temp_opts.empty:
-                opts_active = temp_opts
-                log_func(f"🔍 [DEBUG OPTIONS] Success! Matched Options using string: '{s_sym}'")
-                break
-                
         active_expiries = pd.to_datetime(opts_active['expiry'], errors='coerce').dt.date.dropna().unique().tolist() if not opts_active.empty else []
             
         expired_expiries = []
@@ -172,14 +153,10 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
         all_expiries = sorted(list(set(active_expiries + expired_expiries)))
         future_expiries = [d for d in all_expiries if d >= entry_date]
         
-        log_func(f"🔍 [DEBUG OPTIONS] Found {len(active_expiries)} active, {len(expired_expiries)} expired. {len(future_expiries)} valid futures.")
-        if not future_expiries: 
-            log_func("⚠️ [DEBUG OPTIONS] No valid expiries found on or after entry date.")
-            return []
+        if not future_expiries: return []
             
         closest_expiry = future_expiries[0]
         is_expired = closest_expiry < current_date
-        log_func(f"🔍 [DEBUG OPTIONS] Target Expiry: {closest_expiry} (Is Expired: {is_expired})")
         
         chain_df = pd.DataFrame()
         if is_expired:
@@ -195,50 +172,48 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
                         if 'trading_symbol' in chain_df.columns: chain_df.rename(columns={'trading_symbol': 'tradingsymbol'}, inplace=True)
             except Exception: pass
         else:
-            # Match the exact string that worked above
-            matched_sym = s_sym if not opts_active.empty else spot_sym
             if 'underlying_symbol' in df_inst.columns:
-                chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == matched_sym) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
+                chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == spot_sym) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
             else:
-                chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['tradingsymbol'].str.startswith(matched_sym)) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
+                chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['tradingsymbol'].str.startswith(spot_sym)) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
 
         if chain_cache is not None:
             chain_cache[cache_key] = {'df': chain_df, 'is_expired': is_expired, 'closest_expiry': closest_expiry}
 
-    if chain_df.empty: 
-        log_func("⚠️ [DEBUG OPTIONS] Option chain DataFrame is empty.")
-        return []
+    if chain_df.empty: return []
 
     chain_df['strike'] = pd.to_numeric(chain_df['strike'], errors='coerce')
     chain_df = chain_df.dropna(subset=['strike'])
     unique_strikes = sorted(chain_df['strike'].unique())
-    log_func(f"🔍 [DEBUG OPTIONS] Found {len(unique_strikes)} unique strikes in chain.")
-    
     if not unique_strikes: return []
         
     closest_idx = min(range(len(unique_strikes)), key=lambda i: abs(unique_strikes[i] - entry_price))
     
     try:
-        otm2_pe = unique_strikes[max(0, closest_idx - 2)]
-        otm4_pe = unique_strikes[max(0, closest_idx - 4)]
-        log_func(f"✅ [DEBUG OPTIONS] Mapped Strikes -> OTM2 PE: {otm2_pe}, OTM4 PE: {otm4_pe}")
-    except Exception as e:
+        if "Bull Put" in strategy:
+            strike1 = unique_strikes[max(0, closest_idx - 2)] # OTM2 PE Sell
+            strike2 = unique_strikes[max(0, closest_idx - 4)] # OTM4 PE Buy
+        else: # Bear Call
+            strike1 = unique_strikes[min(len(unique_strikes)-1, closest_idx + 2)] # OTM2 CE Sell
+            strike2 = unique_strikes[min(len(unique_strikes)-1, closest_idx + 4)] # OTM4 CE Buy
+    except Exception:
         return [] 
 
-    def get_key(s, opt_type):
+    def get_key(s, o_type):
         target_strike = float(s)
         col_type = 'option_type' if 'option_type' in chain_df.columns else 'instrument_type'
         leg = chain_df[
             (abs(chain_df['strike'] - target_strike) < 0.05) & 
-            ((chain_df[col_type] == opt_type) | (chain_df['tradingsymbol'].astype(str).str.endswith(opt_type)))
+            ((chain_df[col_type] == o_type) | (chain_df['tradingsymbol'].astype(str).str.endswith(o_type)))
         ]
         return leg.iloc[0]['instrument_key'] if not leg.empty else None
 
     legs = []
-    if "Bull Put Spread" in strategy:
-        legs.append({'type': 'OTM2 PE (Sell)', 'key': get_key(otm2_pe, 'PE'), 'side': -1, 'is_expired': is_expired})
-        legs.append({'type': 'OTM4 PE (Buy)', 'key': get_key(otm4_pe, 'PE'), 'side': 1, 'is_expired': is_expired})
+    if "Bull Put" in strategy:
+        legs.append({'type': 'OTM2 PE (Sell)', 'key': get_key(strike1, 'PE'), 'side': -1, 'is_expired': is_expired})
+        legs.append({'type': 'OTM4 PE (Buy)', 'key': get_key(strike2, 'PE'), 'side': 1, 'is_expired': is_expired})
+    elif "Bear Call" in strategy:
+        legs.append({'type': 'OTM2 CE (Sell)', 'key': get_key(strike1, 'CE'), 'side': -1, 'is_expired': is_expired})
+        legs.append({'type': 'OTM4 CE (Buy)', 'key': get_key(strike2, 'CE'), 'side': 1, 'is_expired': is_expired})
         
-    valid_legs = [l for l in legs if l['key'] is not None]
-    log_func(f"✅ [DEBUG OPTIONS] Final Valid Legs Retrieved: {len(valid_legs)}")
-    return valid_legs
+    return [l for l in legs if l['key'] is not None]
