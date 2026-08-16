@@ -1,15 +1,17 @@
 import pandas as pd
 import pandas_ta as ta
+import urllib.parse
+import requests
+import time
 from datetime import timedelta, datetime
-from common.market_data import fetch_upstox_intraday_candles, get_nfo_lot_size, get_option_legs
+from common.market_data import fetch_upstox_intraday_candles, get_nfo_lot_size, get_option_legs, get_instrument_df, get_upstox_key
 
 def get_premium_at_time(df, target_time):
     past = df[df['timestamp'] <= target_time]
     return past.iloc[-1]['close'] if not past.empty else 0.0
 
 def get_option_legs_ce(symbol, entry_time, entry_price, strategy, access_token, chain_cache=None, log_func=print):
-    """Helper to fetch OTM2/4 Call option legs for Bearish/CE trades"""
-    from common.market_data import get_instrument_df, get_upstox_key
+    """Robust OTM2/OTM4 Call Option Leg Mapper for Bear Call Spreads"""
     df_inst = get_instrument_df()
     if df_inst.empty: return []
     
@@ -24,21 +26,25 @@ def get_option_legs_ce(symbol, entry_time, entry_price, strategy, access_token, 
     else:
         eq_key = get_upstox_key(symbol)
         if not eq_key: return []
-        safe_eq_key = urllib.parse.quote(eq_key) if 'urllib' in globals() else __import__('urllib.parse').quote(eq_key)
+        safe_eq_key = urllib.parse.quote(eq_key)
         headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
         
         spot_sym = symbol.upper()
         if spot_sym == 'NIFTY': spot_sym = 'NIFTY 50'
         elif spot_sym == 'BANKNIFTY': spot_sym = 'NIFTY BANK'
         elif spot_sym == 'SENSEX': spot_sym = 'BSX'
+        elif spot_sym == 'BANKEX': spot_sym = 'BKX'
         
         valid_fo_exchanges = ['NSE_FO', 'BSE_FO']
-        opts_active = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == spot_sym)] if 'underlying_symbol' in df_inst.columns else df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['name'] == spot_sym)]
+        if 'underlying_symbol' in df_inst.columns:
+            opts_active = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == spot_sym)]
+        else:
+            opts_active = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & ((df_inst['name'] == spot_sym) | (df_inst['tradingsymbol'].str.startswith(spot_sym)))]
+            
         active_expiries = pd.to_datetime(opts_active['expiry'], errors='coerce').dt.date.dropna().unique().tolist() if not opts_active.empty else []
         
         expired_expiries = []
         try:
-            import requests, time
             time.sleep(0.3)
             res = requests.get(f"https://api.upstox.com/v2/expired-instruments/expiries?instrument_key={safe_eq_key}", headers=headers, timeout=10)
             if res.status_code == 200:
@@ -55,7 +61,6 @@ def get_option_legs_ce(symbol, entry_time, entry_price, strategy, access_token, 
         chain_df = pd.DataFrame()
         if is_expired:
             try:
-                import requests, time
                 time.sleep(0.3)
                 res = requests.get(f"https://api.upstox.com/v2/expired-instruments/option/contract?instrument_key={safe_eq_key}&expiry_date={closest_expiry.strftime('%Y-%m-%d')}", headers=headers, timeout=10)
                 if res.status_code == 200:
@@ -65,7 +70,10 @@ def get_option_legs_ce(symbol, entry_time, entry_price, strategy, access_token, 
                         if 'trading_symbol' in chain_df.columns: chain_df.rename(columns={'trading_symbol': 'tradingsymbol'}, inplace=True)
             except Exception: pass
         else:
-            chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == spot_sym) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
+            if 'underlying_symbol' in df_inst.columns:
+                chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == spot_sym) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
+            else:
+                chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['tradingsymbol'].str.startswith(spot_sym)) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
 
         if chain_cache is not None:
             chain_cache[cache_key] = {'df': chain_df, 'is_expired': is_expired}
@@ -78,6 +86,7 @@ def get_option_legs_ce(symbol, entry_time, entry_price, strategy, access_token, 
         
     closest_idx = min(range(len(unique_strikes)), key=lambda i: abs(unique_strikes[i] - entry_price))
     try:
+        # For Call Spreads (Bear Call): Sell OTM2 CE (above spot), Buy OTM4 CE (further above spot)
         otm2_ce = unique_strikes[min(len(unique_strikes)-1, closest_idx + 2)]
         otm4_ce = unique_strikes[min(len(unique_strikes)-1, closest_idx + 4)]
     except Exception: return [] 
@@ -123,7 +132,6 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, progr
         df_15m['EMA_9'] = ta.ema(df_15m['close'], length=9)
         df_15m['EMA_21'] = ta.ema(df_15m['close'], length=21)
         
-        # ATR x 3 Trailing Stop Loss line
         atr_15m = ta.atr(df_15m['high'], df_15m['low'], df_15m['close'], length=14)
         df_15m['ATR_Trailing_Long'] = df_15m['close'] - (3 * atr_15m)
         df_15m['ATR_Trailing_Short'] = df_15m['close'] + (3 * atr_15m)
@@ -135,7 +143,6 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, progr
         }).dropna()
         
         df_3m['EMA_9'] = ta.ema(df_3m['close'], length=9)
-        # Calculate VWAP manually or via pandas-ta if available
         typical_price = (df_3m['high'] + df_3m['low'] + df_3m['close']) / 3
         df_3m['VWAP'] = (typical_price * df_3m['volume']).cumsum() / df_3m['volume'].cumsum()
         df_3m = df_3m.reset_index()
@@ -143,13 +150,11 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, progr
         entries = []
         lot_size = get_nfo_lot_size(symbol)
         
-        # Scan 3-minute candles for Retracement entries mapped with 15-minute trend
         for j in range(1, len(df_3m) - 1):
             c_time = df_3m.loc[j, 'timestamp']
             if c_time < start_dt or c_time > end_dt:
                 continue
                 
-            # Find corresponding 15m bar
             matching_15m = df_15m[df_15m['timestamp'] <= c_time]
             if matching_15m.empty: continue
             curr_15m = matching_15m.iloc[-1]
@@ -163,11 +168,11 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, progr
             c_ema9 = df_3m.loc[j, 'EMA_9']
             c_vwap = df_3m.loc[j, 'VWAP']
             
-            # Bullish Condition (PE Sell / Bull Put Spread)
+            # Bullish Condition (PE Spread)
             is_bullish_trend = ema9_15 > ema21_15
             bullish_retracement = (c_low < c_ema9 or c_low < c_vwap) and (c_close > c_ema9 or c_close > c_vwap)
             
-            # Bearish Condition (CE Sell / Bear Call Spread)
+            # Bearish Condition (CE Spread)
             is_bearish_trend = ema9_15 < ema21_15
             bearish_retracement = (c_high > c_ema9 or c_high > c_vwap) and (c_close < c_ema9 or c_close < c_vwap)
             
@@ -232,12 +237,10 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, progr
             exit_reason = "Data Ended"
             exit_pnl_abs = 0.0
 
-            # Simulate trade forward on 3m bars
             for step in range(start_3m_idx + 1, len(df_3m)):
                 curr_time = df_3m.loc[step, 'timestamp']
                 curr_spot_close = df_3m.loc[step, 'close']
                 
-                # Check 15m Trailing Stop Loss
                 matching_15m = df_15m[df_15m['timestamp'] <= curr_time]
                 if not matching_15m.empty:
                     m15_row = matching_15m.iloc[-1]
@@ -255,9 +258,7 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, progr
                 current_spread_val = l1_curr - l2_curr
                 current_pnl_per_qty = initial_net_credit - current_spread_val
                 
-                # Profit Target: Down by 50% (spread cost is 50% lower than initial credit)
                 target_hit = current_pnl_per_qty >= (0.50 * initial_net_credit)
-                # Stop Loss: Appreciated by 50% (spread cost increased by 50% relative to credit)
                 sl_hit = current_pnl_per_qty <= (-0.50 * initial_net_credit)
 
                 if target_hit:
@@ -269,7 +270,6 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, progr
                     exit_time = curr_time
                     break
 
-            # Calculate final PnL
             l1_final = get_premium_at_time(leg_data[0]['df'], exit_time)
             l2_final = get_premium_at_time(leg_data[1]['df'], exit_time)
             final_spread_val = l1_final - l2_final
