@@ -2,21 +2,22 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 from common.github_uploader import push_csv_to_github
-
-# Notice the updated import name here!
 from .strategy_engine import process_autonomous_rsi_ubb
 
 def run_rsi_ubb_app():
-    st.title("🐂 Autonomous 15m RSI & UBB Scanner")
-    st.markdown("**(Native Entry Scanning + OTM2/4 Bull Put Exits)**")
+    st.title("🐂 Autonomous Multi-Index RSI & UBB Scanner")
+    st.markdown("**(Automatic Multi-Index Scan: NIFTY, SENSEX + OTM2/4 Bull Put Exits)**")
 
     st.sidebar.header("⚙️ Configuration")
-    strategy_name = st.sidebar.text_input("Report Name", value="15m_RSI_UBB_Autonomous")
+    strategy_name = st.sidebar.text_input("Report Name", value="multi_index_rsi_ubb")
     
     st.sidebar.markdown("### 🔍 Scanner Inputs")
-    symbol = st.sidebar.text_input("Symbol (e.g., NIFTY, BANKNIFTY, RELIANCE)", value="NIFTY")
+    selected_symbols = st.sidebar.multiselect(
+        "Indices to Scan Automatically:",
+        ["NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY", "BANKEX"],
+        default=["NIFTY", "SENSEX"]
+    )
     
-    # Default to testing the last 30 days
     start_date = st.sidebar.date_input("Start Date", datetime.today() - timedelta(days=365))
     end_date = st.sidebar.date_input("End Date", datetime.today())
     
@@ -31,11 +32,14 @@ def run_rsi_ubb_app():
 
     def ui_log(msg):
         log_messages.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-        log_box.code("\n".join(log_messages[-25:]), language="text")
+        log_box.code("\n".join(log_messages[-30:]), language="text")
     
-    if st.button("🚀 Run Autonomous Backtest"):
+    if st.button("🚀 Run Multi-Index Autonomous Backtest"):
         if not upstox_token:
             st.error("❌ UPSTOX_ACCESS_TOKEN missing from Secrets.")
+            return
+        if not selected_symbols:
+            st.error("⚠️ Please select at least one index to scan.")
             return
 
         progress_bar = st.progress(0)
@@ -45,9 +49,9 @@ def run_rsi_ubb_app():
             progress_bar.progress(int((current / total) * 100))
             status_text.text(f"[{current}/{total}] {message}")
 
-        # Passes the autonomous date range instead of CSVs
+        # Passes the list of indices to scan automatically
         trades_df = process_autonomous_rsi_ubb(
-            symbol=symbol.strip().upper(),
+            symbols=selected_symbols,
             start_date=start_date,
             end_date=end_date,
             upstox_token=upstox_token,
@@ -56,9 +60,9 @@ def run_rsi_ubb_app():
         )
 
         if trades_df.empty:
-            st.warning("⚠️ No trades found matching the RSI/UBB criteria in this date range.")
+            st.warning("⚠️ No trades found matching the RSI/UBB criteria across selected indices in this date range.")
         else:
-            st.success("✅ Autonomous Backtest Complete!")
+            st.success("✅ Multi-Index Autonomous Backtest Complete!")
             
             total_pnl = trades_df['PnL (₹)'].sum()
             win_rate = (len(trades_df[trades_df['PnL (₹)'] > 0]) / len(trades_df)) * 100
@@ -68,15 +72,13 @@ def run_rsi_ubb_app():
             col2.metric("💰 Total Net PnL", f"₹ {round(total_pnl, 2)}")
             col3.metric("🎯 Win Rate", f"{round(win_rate, 2)}%")
 
-            # Fixed the deprecation warning
             st.dataframe(trades_df, width='stretch')
 
             csv_buffer = trades_df.to_csv(index=False)
             export_filename = f"{strategy_name.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
             if github_pat and github_repo:
-                with st.spinner("Pushing to GitHub `data_outputs/`..."):
-                    # Now returns the exact error string if it fails
+                with st.spinner("Pushing combined report to GitHub `data_outputs/`..."):
                     success, path_or_err = push_csv_to_github(csv_buffer, strategy_name, github_pat, github_repo, github_branch)
                     if success: 
                         st.success(f"✅ Archiving complete: `{path_or_err}`")
