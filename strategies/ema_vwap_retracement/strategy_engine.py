@@ -7,7 +7,7 @@ def get_premium_at_time(df, target_time):
     past = df[df['timestamp'] <= target_time]
     return past.iloc[-1]['close'] if not past.empty else 0.0
 
-def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_offset=2, buy_offset=4, progress_callback=None, log_func=print):
+def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_offset=2, buy_offset=4, require_color=False, require_volume=False, progress_callback=None, log_func=print):
     all_trades = []
     total_symbols = len(symbols)
     
@@ -45,13 +45,15 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
         
         df_3m['EMA_9'] = ta.ema(df_3m['close'], length=9)
         typical_price = (df_3m['high'] + df_3m['low'] + df_3m['close']) / 3
-        df_3m['VWAP'] = (typical_price * df_3m['volume']).cumsum() / df_3m['volume'].cumsum()
+        
+        # Protect VWAP against Zero-Volume Spot Index Data
+        vol_cumsum = df_3m['volume'].cumsum()
+        df_3m['VWAP'] = (typical_price * df_3m['volume']).cumsum() / vol_cumsum.replace(0, 1)
         df_3m = df_3m.reset_index()
         
         entries = []
         lot_size = get_nfo_lot_size(symbol)
         
-        # Start at index 1 to ensure we have a previous candle for volume comparison
         for j in range(1, len(df_3m) - 1):
             c_time = df_3m.loc[j, 'timestamp']
             if c_time < start_dt or c_time > end_dt:
@@ -76,23 +78,25 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             # --- Bullish Conditions (PE Spread) ---
             is_bullish_trend = ema9_15 > ema21_15
             bullish_retracement = (c_low < c_ema9 or c_low < c_vwap) and (c_close > c_ema9 or c_close > c_vwap)
-            # New Rules: Close > Open (Green Candle) AND Volume Surge
-            bullish_candle_reqs = (c_close > c_open) and (c_vol > p_vol)
+            
+            bull_color_ok = (c_close > c_open) if require_color else True
+            bull_vol_ok = (c_vol > p_vol) if require_volume else True
             
             # --- Bearish Conditions (CE Spread) ---
             is_bearish_trend = ema9_15 < ema21_15
             bearish_retracement = (c_high > c_ema9 or c_high > c_vwap) and (c_close < c_ema9 or c_close < c_vwap)
-            # New Rules: Close < Open (Red Candle) AND Volume Surge
-            bearish_candle_reqs = (c_close < c_open) and (c_vol > p_vol)
             
-            if is_bullish_trend and bullish_retracement and bullish_candle_reqs:
+            bear_color_ok = (c_close < c_open) if require_color else True
+            bear_vol_ok = (c_vol > p_vol) if require_volume else True
+            
+            if is_bullish_trend and bullish_retracement and bull_color_ok and bull_vol_ok:
                 entries.append({
                     'time': df_3m.loc[j+1, 'timestamp'],
                     'price': df_3m.loc[j+1, 'open'],
                     'type': 'PE_SPREAD',
                     '3m_idx': j+1
                 })
-            elif is_bearish_trend and bearish_retracement and bearish_candle_reqs:
+            elif is_bearish_trend and bearish_retracement and bear_color_ok and bear_vol_ok:
                 entries.append({
                     'time': df_3m.loc[j+1, 'timestamp'],
                     'price': df_3m.loc[j+1, 'open'],
