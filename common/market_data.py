@@ -76,7 +76,7 @@ def fetch_upstox_intraday_candles(symbol_or_key, start_dt, end_dt, access_token,
     base_url = UPSTOX_EXPIRED_HISTORICAL_URL if is_expired else UPSTOX_HISTORICAL_URL
 
     while chunk_start < end_dt:
-        chunk_end = min(chunk_start + timedelta(days=30), end_dt)
+        chunk_end = min(chunk_start + timedelta(days=20), end_dt)
         url = base_url.format(
             instrument_key=safe_instrument_key, 
             unit=interval,
