@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: upstox-trading-hub
+Version: 0.1.0
+Requires-Dist: streamlit>=1.30.0
+Requires-Dist: pandas>=2.0.0
+Requires-Dist: numpy>=1.24.0
+Requires-Dist: requests>=2.31.0
+Requires-Dist: PyGithub>=2.1.0
+Requires-Dist: pytz>=2023.3
+Requires-Dist: pandas-ta>=0.3.14b0
