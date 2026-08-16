@@ -28,7 +28,8 @@ def get_upstox_key(symbol):
         'BANKNIFTY': 'NSE_INDEX|Nifty Bank',
         'FINNIFTY': 'NSE_INDEX|Nifty Fin Service',
         'SENSEX': 'BSE_INDEX|SENSEX',
-        'BANKEX': 'BSE_INDEX|BANKEX'
+        'BANKEX': 'BSE_INDEX|BANKEX',
+        'MIDCPNIFTY': 'NSE_INDEX|NIFTY MID SELECT'
     }
     if sym_upper in index_keys: return index_keys[sym_upper]
         
@@ -46,6 +47,7 @@ def get_nfo_lot_size(symbol):
     if symbol_upper == 'NIFTY': symbol_upper = 'NIFTY 50'
     elif symbol_upper == 'BANKNIFTY': symbol_upper = 'NIFTY BANK'
     elif symbol_upper == 'SENSEX': symbol_upper = 'BSX'
+    elif symbol_upper == 'BANKEX': symbol_upper = 'BKX'
     
     valid_exchanges = ['NSE_FO', 'BSE_FO']
     if 'underlying_symbol' in df.columns:
@@ -94,8 +96,7 @@ def fetch_upstox_intraday_candles(symbol_or_key, start_dt, end_dt, access_token,
             if response.status_code == 200:
                 candles = response.json().get("data", {}).get("candles", [])
                 if candles: all_candles.extend(candles)
-        except Exception:
-            pass
+        except Exception: pass
         chunk_start = chunk_end + timedelta(days=1)
 
     if not all_candles: return pd.DataFrame()
@@ -105,13 +106,13 @@ def fetch_upstox_intraday_candles(symbol_or_key, start_dt, end_dt, access_token,
     df = df.drop_duplicates(subset=['timestamp']).sort_values("timestamp").reset_index(drop=True)
     return df
 
-def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, chain_cache=None, log_func=print):
+def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, sell_offset=2, buy_offset=4, chain_cache=None, log_func=print):
     df_inst = get_instrument_df()
     if df_inst.empty: return []
     
     entry_date = pd.to_datetime(entry_time).date()
     current_date = pd.Timestamp.now(tz="Asia/Kolkata").date()
-    cache_key = f"{symbol}_{entry_date}_{strategy}"
+    cache_key = f"{symbol}_{entry_date}_{strategy}_{sell_offset}_{buy_offset}"
     
     if chain_cache is not None and cache_key in chain_cache:
         cached_data = chain_cache[cache_key]
@@ -152,7 +153,6 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
 
         all_expiries = sorted(list(set(active_expiries + expired_expiries)))
         future_expiries = [d for d in all_expiries if d >= entry_date]
-        
         if not future_expiries: return []
             
         closest_expiry = future_expiries[0]
@@ -191,11 +191,11 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
     
     try:
         if "Bull Put" in strategy:
-            strike1 = unique_strikes[max(0, closest_idx - 2)] # OTM2 PE Sell
-            strike2 = unique_strikes[max(0, closest_idx - 4)] # OTM4 PE Buy
-        else: # Bear Call
-            strike1 = unique_strikes[min(len(unique_strikes)-1, closest_idx + 2)] # OTM2 CE Sell
-            strike2 = unique_strikes[min(len(unique_strikes)-1, closest_idx + 4)] # OTM4 CE Buy
+            strike_sell = unique_strikes[max(0, closest_idx - sell_offset)]
+            strike_buy = unique_strikes[max(0, closest_idx - buy_offset)]
+        else: # Bear Call Spread
+            strike_sell = unique_strikes[min(len(unique_strikes)-1, closest_idx + sell_offset)]
+            strike_buy = unique_strikes[min(len(unique_strikes)-1, closest_idx + buy_offset)]
     except Exception:
         return [] 
 
@@ -210,10 +210,10 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
 
     legs = []
     if "Bull Put" in strategy:
-        legs.append({'type': 'OTM2 PE (Sell)', 'key': get_key(strike1, 'PE'), 'side': -1, 'is_expired': is_expired})
-        legs.append({'type': 'OTM4 PE (Buy)', 'key': get_key(strike2, 'PE'), 'side': 1, 'is_expired': is_expired})
+        legs.append({'type': f'OTM{sell_offset} PE (Sell)', 'strike': strike_sell, 'key': get_key(strike_sell, 'PE'), 'side': -1, 'is_expired': is_expired})
+        legs.append({'type': f'OTM{buy_offset} PE (Buy)', 'strike': strike_buy, 'key': get_key(strike_buy, 'PE'), 'side': 1, 'is_expired': is_expired})
     elif "Bear Call" in strategy:
-        legs.append({'type': 'OTM2 CE (Sell)', 'key': get_key(strike1, 'CE'), 'side': -1, 'is_expired': is_expired})
-        legs.append({'type': 'OTM4 CE (Buy)', 'key': get_key(strike2, 'CE'), 'side': 1, 'is_expired': is_expired})
+        legs.append({'type': f'OTM{sell_offset} CE (Sell)', 'strike': strike_sell, 'key': get_key(strike_sell, 'CE'), 'side': -1, 'is_expired': is_expired})
+        legs.append({'type': f'OTM{buy_offset} CE (Buy)', 'strike': strike_buy, 'key': get_key(strike_buy, 'CE'), 'side': 1, 'is_expired': is_expired})
         
     return [l for l in legs if l['key'] is not None]
