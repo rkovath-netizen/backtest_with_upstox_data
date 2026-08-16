@@ -21,7 +21,7 @@ if app_mode == "📈 Comparative Options Backtester":
 elif app_mode == "🐂 15m RSI Bull Put Spread":
     from strategies.rsi_ubb_bull_put.app import run_rsi_ubb_app
     run_rsi_ubb_app()
- elif app_mode == "🌊 EMA & VWAP Retracement Scanner":
+elif app_mode == "🌊 EMA & VWAP Retracement Scanner":
     from strategies.ema_vwap_retracement.app import run_ema_vwap_app
     run_ema_vwap_app()
 else:
