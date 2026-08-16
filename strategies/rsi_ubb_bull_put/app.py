@@ -1,18 +1,24 @@
 import streamlit as st
 import pandas as pd
-import io
-from datetime import datetime
+from datetime import datetime, timedelta
 from common.github_uploader import push_csv_to_github
-from .strategy_engine import process_rsi_ubb_strategy
+
+# Notice the updated import name here!
+from .strategy_engine import process_autonomous_rsi_ubb
 
 def run_rsi_ubb_app():
-    st.title("🐂 15m RSI & UBB Bull Put Spread")
-    st.markdown("**(OTM2 Sell & OTM4 Buy | Dynamic Exits)**")
+    st.title("🐂 Autonomous 15m RSI & UBB Scanner")
+    st.markdown("**(Native Entry Scanning + OTM2/4 Bull Put Exits)**")
 
     st.sidebar.header("⚙️ Configuration")
-    strategy_name = st.sidebar.text_input("Report Name", value="15m_RSI_Bull_Put")
+    strategy_name = st.sidebar.text_input("Report Name", value="15m_RSI_UBB_Autonomous")
     
-    st.sidebar.info("💡 **Entry Logic:** Upload your Streak CSVs. The engine assumes the CSV already filtered for Monday 9:16 AM entry triggers.")
+    st.sidebar.markdown("### 🔍 Scanner Inputs")
+    symbol = st.sidebar.text_input("Symbol (e.g., NIFTY, BANKNIFTY, RELIANCE)", value="NIFTY")
+    
+    # Default to testing the last 30 days
+    start_date = st.sidebar.date_input("Start Date", datetime.today() - timedelta(days=30))
+    end_date = st.sidebar.date_input("End Date", datetime.today())
     
     upstox_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", None)
     github_pat = st.secrets.get("GITHUB_PAT", None)
@@ -25,11 +31,9 @@ def run_rsi_ubb_app():
 
     def ui_log(msg):
         log_messages.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-        log_box.code("\n".join(log_messages[-20:]), language="text")
-
-    uploaded_files = st.file_uploader("Upload Streak Scanner CSVs", accept_multiple_files=True)
+        log_box.code("\n".join(log_messages[-25:]), language="text")
     
-    if st.button("🚀 Run Dynamic Backtest") and uploaded_files:
+    if st.button("🚀 Run Autonomous Backtest"):
         if not upstox_token:
             st.error("❌ UPSTOX_ACCESS_TOKEN missing from Secrets.")
             return
@@ -41,16 +45,28 @@ def run_rsi_ubb_app():
             progress_bar.progress(int((current / total) * 100))
             status_text.text(f"[{current}/{total}] {message}")
 
-        trades_df = process_rsi_ubb_strategy(uploaded_files, upstox_token, update_progress, ui_log)
+        # Passes the autonomous date range instead of CSVs
+        trades_df = process_autonomous_rsi_ubb(
+            symbol=symbol.strip().upper(),
+            start_date=start_date,
+            end_date=end_date,
+            upstox_token=upstox_token,
+            progress_callback=update_progress,
+            log_func=ui_log
+        )
 
-        if not trades_df.empty:
-            st.success("✅ Backtest Complete!")
+        if trades_df.empty:
+            st.warning("⚠️ No trades found matching the RSI/UBB criteria in this date range.")
+        else:
+            st.success("✅ Autonomous Backtest Complete!")
             
             total_pnl = trades_df['PnL (₹)'].sum()
             win_rate = (len(trades_df[trades_df['PnL (₹)'] > 0]) / len(trades_df)) * 100
             
-            st.metric("💰 Total Net PnL", f"₹ {round(total_pnl, 2)}")
-            st.metric("🎯 Win Rate", f"{round(win_rate, 2)}%")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Trades Found", len(trades_df))
+            col2.metric("💰 Total Net PnL", f"₹ {round(total_pnl, 2)}")
+            col3.metric("🎯 Win Rate", f"{round(win_rate, 2)}%")
 
             st.dataframe(trades_df, use_container_width=True)
 
