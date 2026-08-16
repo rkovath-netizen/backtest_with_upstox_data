@@ -1,0 +1,5 @@
+Symbol,Entry Time,Exit Time,Lot Size,Net Credit (₹),Exit Reason,PnL (₹)
+NIFTY,2026-02-04 09:30:00,2026-02-04 09:45:00,1,28.65,Close > Supertrend,-0.25
+SENSEX,2025-09-17 14:45:00,2025-09-17 15:00:00,1,27.25,Close > Supertrend,-0.6
+SENSEX,2026-02-04 09:45:00,2026-02-04 10:00:00,1,69.65,Close > Supertrend,-0.85
+SENSEX,2026-02-04 10:15:00,2026-02-04 10:30:00,1,83.9,Close > Supertrend,6.95
