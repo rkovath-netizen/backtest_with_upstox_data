@@ -18,6 +18,10 @@ def run_ema_vwap_app():
         default=["NIFTY", "SENSEX"]
     )
     
+    st.sidebar.markdown("### 🧪 Testing Filters (Entry Conditions)")
+    require_color = st.sidebar.checkbox("Require Trend Candle Color", value=False, help="Bullish: Close > Open (Green). Bearish: Close < Open (Red).")
+    require_volume = st.sidebar.checkbox("Require Volume Surge", value=False, help="Current 3m Volume > Previous 3m Volume (Warning: Spot Indices often lack reliable volume data).")
+
     # Dynamic Strike Selectors
     st.sidebar.markdown("### 🎯 Option Strike Configuration")
     sell_offset_map = {
@@ -41,9 +45,6 @@ def run_ema_vwap_app():
     
     sell_offset = sell_offset_map[selected_sell_label]
     buy_offset = buy_offset_map[selected_buy_label]
-    
-    if buy_offset <= sell_offset:
-        st.sidebar.error("⚠️ Buy Hedge Leg must be further OTM than the Sell Leg!")
     
     start_date = st.sidebar.date_input("Start Date", datetime.today() - timedelta(days=30))
     end_date = st.sidebar.date_input("End Date", datetime.today())
@@ -89,6 +90,8 @@ def run_ema_vwap_app():
             upstox_token=upstox_token,
             sell_offset=sell_offset,
             buy_offset=buy_offset,
+            require_color=require_color,
+            require_volume=require_volume,
             progress_callback=update_progress,
             log_func=ui_log
         )
