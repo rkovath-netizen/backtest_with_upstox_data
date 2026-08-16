@@ -13,8 +13,8 @@ def process_autonomous_rsi_ubb(symbol, start_date, end_date, upstox_token, progr
     start_dt = datetime.combine(start_date, datetime.min.time())
     end_dt = datetime.combine(end_date, datetime.max.time())
     
-    # 15-day warmup so RSI and UBB are fully formed on Day 1 of the backtest
-    warmup_start = start_dt - timedelta(days=15)
+    # 20-day warmup to ensure 100% clean data for Bollinger Bands and RSI
+    warmup_start = start_dt - timedelta(days=20)
     
     spot_1m = fetch_upstox_intraday_candles(symbol, warmup_start, end_dt, upstox_token, is_key=False, log_func=log_func)
     if spot_1m.empty:
@@ -33,7 +33,7 @@ def process_autonomous_rsi_ubb(symbol, start_date, end_date, upstox_token, progr
     # Bollinger Bands (Length 20, StdDev 2)
     bbands = ta.bbands(spot_15m['close'], length=20, std=2)
     if bbands is not None and not bbands.empty and bbands.shape[1] >= 2:
-        spot_15m['UBB_20_2'] = bbands.iloc[:, 1] # Upper band is always column index 1
+        spot_15m['UBB_20_2'] = bbands.iloc[:, 1]
     else:
         spot_15m['UBB_20_2'] = 0.0
     
@@ -43,14 +43,20 @@ def process_autonomous_rsi_ubb(symbol, start_date, end_date, upstox_token, progr
     
     spot_15m = spot_15m.reset_index()
     
+    # DROP NaN values created by the indicator lookback periods before scanning
+    spot_15m = spot_15m.dropna().reset_index(drop=True)
+    
     entries = []
     lot_size = get_nfo_lot_size(symbol)
     
     # Scanner Logic
     for i in range(1, len(spot_15m)):
         curr_time = spot_15m.loc[i, 'timestamp']
-        if curr_time < start_dt: continue # Skip warmup period, only trade inside user's date range
         
+        # Only evaluate trades inside the requested date range
+        if curr_time < start_dt or curr_time > end_dt:
+            continue
+            
         prev_rsi = spot_15m.loc[i-1, 'RSI_14']
         curr_rsi = spot_15m.loc[i, 'RSI_14']
         curr_close = spot_15m.loc[i, 'close']
@@ -58,11 +64,11 @@ def process_autonomous_rsi_ubb(symbol, start_date, end_date, upstox_token, progr
         
         # Condition 1: RSI crosses above 70
         rsi_crossed_above = (prev_rsi <= 70) and (curr_rsi > 70)
-        # Condition 2: Close is strictly below the Upper Bollinger Band
+        
+        # Condition 2: Close is below UBB
         closed_below_ubb = curr_close < curr_ubb
         
         if rsi_crossed_above and closed_below_ubb:
-            # Entry occurs on the NEXT candle open
             if i + 1 < len(spot_15m):
                 entry_time = spot_15m.loc[i+1, 'timestamp']
                 entry_price = spot_15m.loc[i+1, 'open']
