@@ -7,12 +7,12 @@ def get_premium_at_time(df, target_time):
     past = df[df['timestamp'] <= target_time]
     return past.iloc[-1]['close'] if not past.empty else 0.0
 
-def process_autonomous_rsi_ubb(symbols, start_date, end_date, upstox_token, progress_callback=None, log_func=print):
+def process_autonomous_rsi_ubb(symbols, resample_freq, rsi_threshold, start_date, end_date, upstox_token, progress_callback=None, log_func=print):
     all_trades = []
     total_symbols = len(symbols)
     
     for sym_idx, symbol in enumerate(symbols):
-        log_func(f"\n========================================\n🚀 Processing Index [{sym_idx+1}/{total_symbols}]: {symbol}\n========================================")
+        log_func(f"\n========================================\n🚀 Processing Index [{sym_idx+1}/{total_symbols}]: {symbol} ({resample_freq} Timeframe)\n========================================")
         
         start_dt = datetime.combine(start_date, datetime.min.time())
         end_dt = datetime.combine(end_date, datetime.max.time())
@@ -23,49 +23,47 @@ def process_autonomous_rsi_ubb(symbols, start_date, end_date, upstox_token, prog
             log_func(f"❌ Failed to fetch underlying spot data for {symbol}. Skipping.")
             continue
 
-        log_func(f"📊 Resampling {symbol} to 15-minute timeframe and calculating indicators...")
+        log_func(f"📊 Resampling {symbol} to {resample_freq} timeframe and calculating indicators...")
         
-        spot_15m = spot_1m.set_index('timestamp').resample('15min').agg({
+        # Resample using the selected timeframe frequency (e.g., 5min, 15min, 30min)
+        spot_df = spot_1m.set_index('timestamp').resample(resample_freq).agg({
             'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
         }).dropna()
         
-        # RSI (14)
-        spot_15m['RSI_14'] = ta.rsi(spot_15m['close'], length=14)
+        spot_df['RSI_14'] = ta.rsi(spot_df['close'], length=14)
         
-        # Bollinger Bands (Length 20, StdDev 2)
-        bbands = ta.bbands(spot_15m['close'], length=20, std=2)
+        bbands = ta.bbands(spot_df['close'], length=20, std=2)
         if bbands is not None and not bbands.empty and bbands.shape[1] >= 2:
-            spot_15m['UBB_20_2'] = bbands.iloc[:, 1]
+            spot_df['UBB_20_2'] = bbands.iloc[:, 1]
         else:
-            spot_15m['UBB_20_2'] = 0.0
+            spot_df['UBB_20_2'] = 0.0
         
-        # Supertrend (7, 3)
-        sti = ta.supertrend(spot_15m['high'], spot_15m['low'], spot_15m['close'], length=7, multiplier=3)
-        spot_15m['Supertrend'] = sti.iloc[:, 0] if sti is not None else 0.0
+        sti = ta.supertrend(spot_df['high'], spot_df['low'], spot_df['close'], length=7, multiplier=3)
+        spot_df['Supertrend'] = sti.iloc[:, 0] if sti is not None else 0.0
         
-        spot_15m = spot_15m.reset_index()
-        spot_15m = spot_15m.dropna().reset_index(drop=True)
+        spot_df = spot_df.reset_index()
+        spot_df = spot_df.dropna().reset_index(drop=True)
         
         entries = []
         lot_size = get_nfo_lot_size(symbol)
         
-        for i in range(1, len(spot_15m)):
-            curr_time = spot_15m.loc[i, 'timestamp']
+        for i in range(1, len(spot_df)):
+            curr_time = spot_df.loc[i, 'timestamp']
             if curr_time < start_dt or curr_time > end_dt:
                 continue
                 
-            prev_rsi = spot_15m.loc[i-1, 'RSI_14']
-            curr_rsi = spot_15m.loc[i, 'RSI_14']
-            curr_close = spot_15m.loc[i, 'close']
-            curr_ubb = spot_15m.loc[i, 'UBB_20_2']
+            prev_rsi = spot_df.loc[i-1, 'RSI_14']
+            curr_rsi = spot_df.loc[i, 'RSI_14']
+            curr_close = spot_df.loc[i, 'close']
+            curr_ubb = spot_df.loc[i, 'UBB_20_2']
             
-            rsi_crossed_above = (prev_rsi <= 60) and (curr_rsi > 60)
+            rsi_crossed_above = (prev_rsi <= rsi_threshold) and (curr_rsi > rsi_threshold)
             closed_below_ubb = curr_close < curr_ubb
             
             if rsi_crossed_above and closed_below_ubb:
-                if i + 1 < len(spot_15m):
-                    entry_time = spot_15m.loc[i+1, 'timestamp']
-                    entry_price = spot_15m.loc[i+1, 'open']
+                if i + 1 < len(spot_df):
+                    entry_time = spot_df.loc[i+1, 'timestamp']
+                    entry_price = spot_df.loc[i+1, 'open']
                     entries.append({'time': entry_time, 'price': entry_price, 'idx': i+1})
 
         log_func(f"🎯 Found {len(entries)} valid setups for {symbol}.")
@@ -99,8 +97,8 @@ def process_autonomous_rsi_ubb(symbols, start_date, end_date, upstox_token, prog
                 
                 df_1m = api_cache[cache_key]
                 if not df_1m.empty:
-                    df_15m = df_1m.set_index('timestamp').resample('15min').agg({'close': 'last'}).dropna().reset_index()
-                    leg_data.append({'side': leg['side'], 'df': df_15m})
+                    df_tf = df_1m.set_index('timestamp').resample(resample_freq).agg({'close': 'last'}).dropna().reset_index()
+                    leg_data.append({'side': leg['side'], 'df': df_tf})
 
             if len(leg_data) != 2: continue
 
@@ -110,17 +108,17 @@ def process_autonomous_rsi_ubb(symbols, start_date, end_date, upstox_token, prog
             
             if initial_net_credit <= 0: continue
 
-            exit_time = spot_15m.iloc[-1]['timestamp']
+            exit_time = spot_df.iloc[-1]['timestamp']
             exit_reason = "Data Ended"
             exit_pnl_abs = 0.0
 
-            for step in range(start_idx + 1, len(spot_15m)):
-                curr_time = spot_15m.loc[step, 'timestamp']
+            for step in range(start_idx + 1, len(spot_df)):
+                curr_time = spot_df.loc[step, 'timestamp']
                 
-                prev_rsi = spot_15m.loc[step-1, 'RSI_14']
-                curr_rsi = spot_15m.loc[step, 'RSI_14']
-                curr_close = spot_15m.loc[step, 'close']
-                curr_st = spot_15m.loc[step, 'Supertrend']
+                prev_rsi = spot_df.loc[step-1, 'RSI_14']
+                curr_rsi = spot_df.loc[step, 'RSI_14']
+                curr_close = spot_df.loc[step, 'close']
+                curr_st = spot_df.loc[step, 'Supertrend']
 
                 rsi_exit = (prev_rsi < 50) and (curr_rsi > 50)
                 st_exit = curr_close > curr_st
