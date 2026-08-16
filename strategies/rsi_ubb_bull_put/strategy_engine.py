@@ -59,7 +59,7 @@ def process_autonomous_rsi_ubb(symbols, start_date, end_date, upstox_token, prog
             curr_close = spot_15m.loc[i, 'close']
             curr_ubb = spot_15m.loc[i, 'UBB_20_2']
             
-            rsi_crossed_above = (prev_rsi <= 70) and (curr_rsi > 70)
+            rsi_crossed_above = (prev_rsi <= 60) and (curr_rsi > 60)
             closed_below_ubb = curr_close < curr_ubb
             
             if rsi_crossed_above and closed_below_ubb:
