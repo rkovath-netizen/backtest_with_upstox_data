@@ -28,13 +28,16 @@ def run_ema_vwap_app():
 
     log_expander = st.expander("🛠️ Real-Time Execution Logs", expanded=True)
     log_box = log_expander.empty()
-    log_messages = []
+    
+    if "ema_vwap_logs" not in st.session_state:
+        st.session_state["ema_vwap_logs"] = []
 
     def ui_log(msg):
-        log_messages.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-        log_box.code("\n".join(log_messages[-30:]), language="text")
+        st.session_state["ema_vwap_logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+        log_box.code("\n".join(st.session_state["ema_vwap_logs"][-30:]), language="text")
     
     if st.button("🚀 Run EMA/VWAP Backtest"):
+        st.session_state["ema_vwap_logs"] = []
         if not upstox_token:
             st.error("❌ UPSTOX_ACCESS_TOKEN missing from Secrets.")
             return
@@ -58,6 +61,11 @@ def run_ema_vwap_app():
             log_func=ui_log
         )
 
+        st.session_state["ema_vwap_trades_df"] = trades_df
+
+    # Persist results across reruns
+    if "ema_vwap_trades_df" in st.session_state:
+        trades_df = st.session_state["ema_vwap_trades_df"]
         if trades_df.empty:
             st.warning("⚠️ No trades found matching the criteria in this date range.")
         else:
