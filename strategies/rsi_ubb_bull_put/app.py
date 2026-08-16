@@ -17,7 +17,7 @@ def run_rsi_ubb_app():
     symbol = st.sidebar.text_input("Symbol (e.g., NIFTY, BANKNIFTY, RELIANCE)", value="NIFTY")
     
     # Default to testing the last 30 days
-    start_date = st.sidebar.date_input("Start Date", datetime.today() - timedelta(days=30))
+    start_date = st.sidebar.date_input("Start Date", datetime.today() - timedelta(days=365))
     end_date = st.sidebar.date_input("End Date", datetime.today())
     
     upstox_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", None)
