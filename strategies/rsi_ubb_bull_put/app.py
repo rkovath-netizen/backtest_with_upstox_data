@@ -5,11 +5,11 @@ from common.github_uploader import push_csv_to_github
 from .strategy_engine import process_autonomous_rsi_ubb
 
 def run_rsi_ubb_app():
-    st.title("🐂 Autonomous Multi-Index RSI & UBB Scanner")
-    st.markdown("**(Automatic Multi-Index Scan: NIFTY, SENSEX + OTM2/4 Bull Put Exits)**")
+    st.title("🐂 Autonomous Multi-Index Quant Scanner")
+    st.markdown("**(Configurable Timeframes + Dynamic RSI & UBB Scanner + OTM2/4 Bull Put Exits)**")
 
     st.sidebar.header("⚙️ Configuration")
-    strategy_name = st.sidebar.text_input("Report Name", value="multi_index_rsi_ubb")
+    strategy_name = st.sidebar.text_input("Report Name", value="quant_rsi_ubb_scan")
     
     st.sidebar.markdown("### 🔍 Scanner Inputs")
     selected_symbols = st.sidebar.multiselect(
@@ -17,6 +17,18 @@ def run_rsi_ubb_app():
         ["NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY", "BANKEX"],
         default=["NIFTY", "SENSEX"]
     )
+    
+    # Timeframe Selector
+    timeframe_map = {
+        "5 Minutes": "5min",
+        "15 Minutes": "15min",
+        "30 Minutes": "30min"
+    }
+    selected_tf_label = st.sidebar.selectbox("Candle Timeframe", list(timeframe_map.keys()), index=0)
+    resample_freq = timeframe_map[selected_tf_label]
+    
+    # RSI Threshold Slider
+    rsi_threshold = st.sidebar.slider("RSI Crossing Threshold", min_value=30, max_value=90, value=60, step=1)
     
     start_date = st.sidebar.date_input("Start Date", datetime.today() - timedelta(days=365))
     end_date = st.sidebar.date_input("End Date", datetime.today())
@@ -34,7 +46,7 @@ def run_rsi_ubb_app():
         log_messages.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
         log_box.code("\n".join(log_messages[-30:]), language="text")
     
-    if st.button("🚀 Run Multi-Index Autonomous Backtest"):
+    if st.button("🚀 Run Autonomous Backtest"):
         if not upstox_token:
             st.error("❌ UPSTOX_ACCESS_TOKEN missing from Secrets.")
             return
@@ -49,9 +61,10 @@ def run_rsi_ubb_app():
             progress_bar.progress(int((current / total) * 100))
             status_text.text(f"[{current}/{total}] {message}")
 
-        # Passes the list of indices to scan automatically
         trades_df = process_autonomous_rsi_ubb(
             symbols=selected_symbols,
+            resample_freq=resample_freq,
+            rsi_threshold=rsi_threshold,
             start_date=start_date,
             end_date=end_date,
             upstox_token=upstox_token,
@@ -60,9 +73,9 @@ def run_rsi_ubb_app():
         )
 
         if trades_df.empty:
-            st.warning("⚠️ No trades found matching the RSI/UBB criteria across selected indices in this date range.")
+            st.warning("⚠️ No trades found matching the criteria across selected indices in this date range.")
         else:
-            st.success("✅ Multi-Index Autonomous Backtest Complete!")
+            st.success("✅ Autonomous Backtest Complete!")
             
             total_pnl = trades_df['PnL (₹)'].sum()
             win_rate = (len(trades_df[trades_df['PnL (₹)'] > 0]) / len(trades_df)) * 100
