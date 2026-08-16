@@ -14,13 +14,36 @@ UPSTOX_EXPIRED_HISTORICAL_URL = "https://api.upstox.com/v2/expired-instruments/h
 def get_instrument_df():
     try:
         df = pd.read_csv(UPSTOX_INSTRUMENT_URL, compression='gzip')
-        # ✅ FIX: Added BSE_INDEX and BSE_FO for full SENSEX support
         df = df[df['exchange'].isin(['NSE_EQ', 'NSE_FO', 'NSE_INDEX', 'BSE_INDEX', 'BSE_FO'])]
         df['expiry'] = pd.to_datetime(df['expiry'], errors='coerce')
         return df
     except Exception as e:
         st.error(f"❌ Failed to download Upstox Instrument Master: {e}")
         return pd.DataFrame()
+
+def get_upstox_key(symbol):
+    df = get_instrument_df()
+    if df.empty: return None
+    
+    sym_upper = symbol.upper()
+    search_sym = sym_upper
+    
+    # Standardize names for Index lookup
+    if search_sym == 'NIFTY': search_sym = 'NIFTY 50'
+    elif search_sym == 'BANKNIFTY': search_sym = 'NIFTY BANK'
+    elif search_sym == 'FINNIFTY': search_sym = 'NIFTY FIN SERVICE'
+
+    # 1. Dynamic Case-Insensitive Index Search (Solves SENSEX casing issues)
+    idx_rows = df[(df['exchange'].isin(['NSE_INDEX', 'BSE_INDEX'])) & (df['tradingsymbol'].str.upper() == search_sym)]
+    if not idx_rows.empty:
+        return idx_rows.iloc[0]['instrument_key']
+        
+    # 2. Fallback to Equity Search
+    eq_rows = df[(df['exchange'].isin(['NSE_EQ', 'BSE_EQ'])) & (df['tradingsymbol'].str.upper() == sym_upper)]
+    if not eq_rows.empty:
+        return eq_rows.iloc[0]['instrument_key']
+        
+    return None
 
 def get_nfo_lot_size(symbol):
     df = get_instrument_df()
@@ -42,20 +65,10 @@ def get_nfo_lot_size(symbol):
 
 def fetch_upstox_intraday_candles(symbol_or_key, start_dt, end_dt, access_token, interval="1minute", is_key=False, is_expired=False, log_func=print):
     if not is_key:
-        clean_sym = symbol_or_key.replace("NSE:", "").replace("BSE:", "").strip().upper()
-        
-        # ✅ FIX: Exact API keys for both NSE and BSE
-        if clean_sym == "NIFTY": instrument_key = "NSE_INDEX|Nifty 50"
-        elif clean_sym == "BANKNIFTY": instrument_key = "NSE_INDEX|Nifty Bank"
-        elif clean_sym == "FINNIFTY": instrument_key = "NSE_INDEX|Nifty Fin Service"
-        elif clean_sym == "SENSEX": instrument_key = "BSE_INDEX|SENSEX"
-        elif clean_sym == "BANKEX": instrument_key = "BSE_INDEX|BANKEX"
-        else:
-            df_inst = get_instrument_df()
-            if df_inst.empty: return pd.DataFrame()
-            eq_rows = df_inst[(df_inst['tradingsymbol'] == clean_sym) & (df_inst['exchange'].isin(['NSE_EQ', 'BSE_EQ']))]
-            if eq_rows.empty: return pd.DataFrame()
-            instrument_key = eq_rows.iloc[0]['instrument_key']
+        instrument_key = get_upstox_key(symbol_or_key)
+        if not instrument_key:
+            log_func(f"⚠️ [DEBUG] Could not resolve Upstox key for {symbol_or_key}.")
+            return pd.DataFrame()
     else:
         instrument_key = symbol_or_key
 
@@ -114,23 +127,19 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
         chain_df = cached_data['df']
         is_expired = cached_data['is_expired']
     else:
-        spot_sym = symbol.upper()
-        
-        # ✅ FIX: Option mapping for NSE and BSE Indices
-        if spot_sym == "NIFTY": eq_key = "NSE_INDEX|Nifty 50"
-        elif spot_sym == "BANKNIFTY": eq_key = "NSE_INDEX|Nifty Bank"
-        elif spot_sym == "FINNIFTY": eq_key = "NSE_INDEX|Nifty Fin Service"
-        elif spot_sym == "SENSEX": eq_key = "BSE_INDEX|SENSEX"
-        elif spot_sym == "BANKEX": eq_key = "BSE_INDEX|BANKEX"
-        else:
-            eq_rows = df_inst[(df_inst['tradingsymbol'] == spot_sym) & (df_inst['exchange'].isin(['NSE_EQ', 'BSE_EQ']))]
-            if eq_rows.empty: return []
-            eq_key = eq_rows.iloc[0]['instrument_key']
+        eq_key = get_upstox_key(symbol)
+        if not eq_key:
+            log_func(f"⚠️ [DEBUG] {symbol}: No underlying instrument found for Options chain.")
+            return []
             
         safe_eq_key = urllib.parse.quote(eq_key)
         headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
         
-        active_expiries = []
+        spot_sym = symbol.upper()
+        if spot_sym == 'NIFTY': spot_sym = 'NIFTY 50'
+        elif spot_sym == 'BANKNIFTY': spot_sym = 'NIFTY BANK'
+        elif spot_sym == 'FINNIFTY': spot_sym = 'NIFTY FIN SERVICE'
+        
         valid_fo_exchanges = ['NSE_FO', 'BSE_FO']
         
         if 'underlying_symbol' in df_inst.columns:
@@ -140,6 +149,8 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
             
         if not opts_active.empty:
             active_expiries = pd.to_datetime(opts_active['expiry'], errors='coerce').dt.date.dropna().unique().tolist()
+        else:
+            active_expiries = []
             
         expired_expiries = []
         try:
