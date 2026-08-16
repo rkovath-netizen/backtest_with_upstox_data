@@ -34,7 +34,11 @@ def process_autonomous_rsi_ubb(symbol, start_date, end_date, upstox_token, progr
     
     # Bollinger Bands (Length 20, StdDev 2)
     bbands = ta.bbands(spot_15m['close'], length=20, std=2)
-    spot_15m['UBB_20_2'] = bbands['BBU_20_2.0'] if bbands is not None else 0.0
+    # The Upper Band is always the second column (iloc[:, 1]) in pandas-ta
+    if bbands is not None and not bbands.empty and bbands.shape[1] >= 2:
+        spot_15m['UBB_20_2'] = bbands.iloc[:, 1]
+    else:
+        spot_15m['UBB_20_2'] = 0.0
     
     # Supertrend (7, 3)
     sti = ta.supertrend(spot_15m['high'], spot_15m['low'], spot_15m['close'], length=7, multiplier=3)
