@@ -68,15 +68,19 @@ def run_rsi_ubb_app():
             col2.metric("💰 Total Net PnL", f"₹ {round(total_pnl, 2)}")
             col3.metric("🎯 Win Rate", f"{round(win_rate, 2)}%")
 
-            st.dataframe(trades_df, use_container_width=True)
+            # Fixed the deprecation warning
+            st.dataframe(trades_df, width='stretch')
 
             csv_buffer = trades_df.to_csv(index=False)
             export_filename = f"{strategy_name.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
             if github_pat and github_repo:
                 with st.spinner("Pushing to GitHub `data_outputs/`..."):
-                    success, path = push_csv_to_github(csv_buffer, strategy_name, github_pat, github_repo, github_branch)
-                    if success: st.success(f"✅ Archiving complete: `{path}`")
-                    else: st.error("❌ GitHub push failed.")
+                    # Now returns the exact error string if it fails
+                    success, path_or_err = push_csv_to_github(csv_buffer, strategy_name, github_pat, github_repo, github_branch)
+                    if success: 
+                        st.success(f"✅ Archiving complete: `{path_or_err}`")
+                    else: 
+                        st.error(f"❌ GitHub push failed! Error Message: {path_or_err}")
             else:
                 st.download_button("📥 Download Result CSV", csv_buffer, export_filename, "text/csv")
