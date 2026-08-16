@@ -4,7 +4,7 @@ import pytz
 import streamlit as st
 import urllib.parse
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 UPSTOX_INSTRUMENT_URL = "https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz"
 UPSTOX_HISTORICAL_URL = "https://api.upstox.com/v2/historical-candle/{instrument_key}/{unit}/{to_date}/{from_date}"
@@ -14,7 +14,8 @@ UPSTOX_EXPIRED_HISTORICAL_URL = "https://api.upstox.com/v2/expired-instruments/h
 def get_instrument_df():
     try:
         df = pd.read_csv(UPSTOX_INSTRUMENT_URL, compression='gzip')
-        df = df[df['exchange'].isin(['NSE_EQ', 'NSE_FO'])]
+        # 🐛 FIX 1: Add NSE_INDEX to allow NIFTY and BANKNIFTY lookups
+        df = df[df['exchange'].isin(['NSE_EQ', 'NSE_FO', 'NSE_INDEX'])]
         df['expiry'] = pd.to_datetime(df['expiry'], errors='coerce')
         return df
     except Exception as e:
@@ -39,12 +40,20 @@ def get_nfo_lot_size(symbol):
 def fetch_upstox_intraday_candles(symbol_or_key, start_dt, end_dt, access_token, interval="1minute", is_key=False, is_expired=False, log_func=print):
     df_inst = get_instrument_df()
     if df_inst.empty:
+        log_func("⚠️ [DEBUG] Instrument Master DataFrame is empty.")
         return pd.DataFrame()
 
     if not is_key:
-        clean_sym = symbol_or_key.replace("NSE:", "").replace("BSE:", "").strip()
-        eq_rows = df_inst[(df_inst['tradingsymbol'] == clean_sym) & (df_inst['exchange'] == 'NSE_EQ')]
+        clean_sym = symbol_or_key.replace("NSE:", "").replace("BSE:", "").strip().upper()
+        
+        # 🐛 FIX 2: Map standard terms to Upstox's strict Index names
+        if clean_sym == "NIFTY": clean_sym = "NIFTY 50"
+        elif clean_sym == "BANKNIFTY": clean_sym = "NIFTY BANK"
+        elif clean_sym == "FINNIFTY": clean_sym = "NIFTY FIN SERVICE"
+
+        eq_rows = df_inst[(df_inst['tradingsymbol'] == clean_sym) & (df_inst['exchange'].isin(['NSE_EQ', 'NSE_INDEX']))]
         if eq_rows.empty:
+            log_func(f"⚠️ [DEBUG] Could not find {clean_sym} in NSE_EQ or NSE_INDEX Master List.")
             return pd.DataFrame()
         instrument_key = eq_rows.iloc[0]['instrument_key']
     else:
@@ -56,35 +65,53 @@ def fetch_upstox_intraday_candles(symbol_or_key, start_dt, end_dt, access_token,
     start_dt = pd.to_datetime(start_dt).tz_localize(None)
     end_dt = pd.to_datetime(end_dt).tz_localize(None)
 
-    if end_dt > current_date:
-        end_dt = current_date
-    if start_dt > current_date:
-        return pd.DataFrame()
+    if end_dt > current_date: end_dt = current_date
+    if start_dt > current_date: return pd.DataFrame()
 
+    # 🐛 FIX 3: Chunking the API Call - Upstox rejects 365-day requests for 1m data
+    all_candles = []
+    chunk_start = start_dt
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
     base_url = UPSTOX_EXPIRED_HISTORICAL_URL if is_expired else UPSTOX_HISTORICAL_URL
-    url = base_url.format(
-        instrument_key=safe_instrument_key, 
-        unit=interval,
-        to_date=end_dt.strftime("%Y-%m-%d"), 
-        from_date=start_dt.strftime("%Y-%m-%d")
-    )
-    
-    try:
-        time.sleep(0.2)  # Rate Limit Pacing for Cloudflare
-        headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
-        response = requests.get(url, headers=headers, timeout=10)
+
+    while chunk_start < end_dt:
+        chunk_end = min(chunk_start + timedelta(days=30), end_dt)
+        url = base_url.format(
+            instrument_key=safe_instrument_key, 
+            unit=interval,
+            to_date=chunk_end.strftime("%Y-%m-%d"), 
+            from_date=chunk_start.strftime("%Y-%m-%d")
+        )
         
-        if response.status_code == 200:
-            candles = response.json().get("data", {}).get("candles", [])
-            if not candles:
-                return pd.DataFrame()
-            df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume", "oi"])
-            df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_convert(pytz.timezone("Asia/Kolkata")).dt.tz_localize(None)
-            return df.sort_values("timestamp").reset_index(drop=True)
-        else:
-            return pd.DataFrame()
-    except Exception:
+        try:
+            time.sleep(0.3)  # Cloudflare pacing
+            if not is_key:
+                log_func(f"   📡 Fetching {symbol_or_key} Spot: {chunk_start.date()} to {chunk_end.date()}...")
+            
+            response = requests.get(url, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                candles = response.json().get("data", {}).get("candles", [])
+                if candles:
+                    all_candles.extend(candles)
+            else:
+                log_func(f"   ⚠️ [DEBUG] API Error {response.status_code} for chunk {chunk_start.date()}: {response.text}")
+                
+        except Exception as e:
+            log_func(f"   ⚠️ [DEBUG] Network Exception: {str(e)}")
+        
+        chunk_start = chunk_end + timedelta(days=1)
+
+    if not all_candles:
+        log_func(f"⚠️ [DEBUG] No data returned from API for {symbol_or_key} across all chunks.")
         return pd.DataFrame()
+        
+    df = pd.DataFrame(all_candles, columns=["timestamp", "open", "high", "low", "close", "volume", "oi"])
+    df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_convert(pytz.timezone("Asia/Kolkata")).dt.tz_localize(None)
+    
+    # Drop duplicates caused by chunk boundaries
+    df = df.drop_duplicates(subset=['timestamp']).sort_values("timestamp").reset_index(drop=True)
+    return df
 
 def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, chain_cache=None, log_func=print):
     df_inst = get_instrument_df()
@@ -99,10 +126,15 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
         chain_df = cached_data['df']
         is_expired = cached_data['is_expired']
     else:
-        eq_rows = df_inst[(df_inst['tradingsymbol'] == symbol) & (df_inst['exchange'] == 'NSE_EQ')]
+        # Map Index names for spot lookup
+        spot_sym = symbol.upper()
+        if spot_sym == "NIFTY": spot_sym = "NIFTY 50"
+        elif spot_sym == "BANKNIFTY": spot_sym = "NIFTY BANK"
+        elif spot_sym == "FINNIFTY": spot_sym = "NIFTY FIN SERVICE"
+
+        eq_rows = df_inst[(df_inst['tradingsymbol'] == spot_sym) & (df_inst['exchange'].isin(['NSE_EQ', 'NSE_INDEX']))]
         if eq_rows.empty:
-            if strategy == "Options: Naked Call Buy":
-                log_func(f"⚠️ {symbol}: No underlying Cash instrument found in Master.")
+            log_func(f"⚠️ [DEBUG] {symbol}: No underlying Cash/Index instrument found in Master.")
             return []
             
         eq_key = eq_rows.iloc[0]['instrument_key']
@@ -111,16 +143,16 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
         
         active_expiries = []
         if 'underlying_symbol' in df_inst.columns:
-            opts_active = df_inst[(df_inst['exchange'] == 'NSE_FO') & (df_inst['underlying_symbol'] == symbol)]
+            opts_active = df_inst[(df_inst['exchange'] == 'NSE_FO') & (df_inst['underlying_symbol'] == symbol.upper())]
         else:
-            opts_active = df_inst[(df_inst['exchange'] == 'NSE_FO') & ((df_inst['name'] == symbol) | (df_inst['tradingsymbol'].str.startswith(symbol)))]
+            opts_active = df_inst[(df_inst['exchange'] == 'NSE_FO') & ((df_inst['name'] == symbol.upper()) | (df_inst['tradingsymbol'].str.startswith(symbol.upper())))]
             
         if not opts_active.empty:
             active_expiries = pd.to_datetime(opts_active['expiry'], errors='coerce').dt.date.dropna().unique().tolist()
             
         expired_expiries = []
         try:
-            time.sleep(0.2)
+            time.sleep(0.3)
             exp_url = f"https://api.upstox.com/v2/expired-instruments/expiries?instrument_key={safe_eq_key}"
             res = requests.get(exp_url, headers=headers, timeout=10)
             if res.status_code == 200:
@@ -133,8 +165,7 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
         future_expiries = [d for d in all_expiries if d >= entry_date]
         
         if not future_expiries:
-            if strategy == "Options: Naked Call Buy":
-                log_func(f"⚠️ {symbol}: No expiries found >= {entry_date}. (Cash-only stock?)")
+            log_func(f"⚠️ [DEBUG] {symbol}: No expiries found >= {entry_date}.")
             return []
             
         closest_expiry = future_expiries[0]
@@ -143,7 +174,7 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
         chain_df = pd.DataFrame()
         if is_expired:
             try:
-                time.sleep(0.2)
+                time.sleep(0.3)
                 opt_url = f"https://api.upstox.com/v2/expired-instruments/option/contract?instrument_key={safe_eq_key}&expiry_date={closest_expiry.strftime('%Y-%m-%d')}"
                 res = requests.get(opt_url, headers=headers, timeout=10)
                 if res.status_code == 200:
@@ -158,9 +189,9 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
                 return []
         else:
             if 'underlying_symbol' in df_inst.columns:
-                chain_df = df_inst[(df_inst['exchange'] == 'NSE_FO') & (df_inst['underlying_symbol'] == symbol) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
+                chain_df = df_inst[(df_inst['exchange'] == 'NSE_FO') & (df_inst['underlying_symbol'] == symbol.upper()) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
             else:
-                chain_df = df_inst[(df_inst['exchange'] == 'NSE_FO') & (df_inst['tradingsymbol'].str.startswith(symbol)) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
+                chain_df = df_inst[(df_inst['exchange'] == 'NSE_FO') & (df_inst['tradingsymbol'].str.startswith(symbol.upper())) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
 
         if chain_cache is not None:
             chain_cache[cache_key] = {
@@ -169,8 +200,7 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
                 'closest_expiry': closest_expiry
             }
 
-    if chain_df.empty:
-        return []
+    if chain_df.empty: return []
 
     chain_df['strike'] = pd.to_numeric(chain_df['strike'], errors='coerce')
     chain_df = chain_df.dropna(subset=['strike'])
@@ -192,9 +222,6 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
         otm4_ce = unique_strikes[min(len(unique_strikes)-1, closest_idx + 4)]
     except Exception:
         return [] 
-        
-    if strategy == "Options: Naked Call Buy":
-        log_func(f"✅ {symbol} | Found ATM {atm} | via {'API (Expired)' if is_expired else 'Master (Active)'}")
 
     def get_key(s, opt_type):
         target_strike = float(s)
@@ -206,29 +233,8 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
         return leg.iloc[0]['instrument_key'] if not leg.empty else None
 
     legs = []
-    if strategy == "Options: Naked Call Buy":
-        legs.append({'type': 'ATM CE', 'key': get_key(atm, 'CE'), 'side': 1, 'is_expired': is_expired})
-    elif strategy == "Options: Naked Put Buy": 
-        legs.append({'type': 'ATM PE', 'key': get_key(atm, 'PE'), 'side': 1, 'is_expired': is_expired})
-    elif strategy == "Options: Long Straddle":
-        legs.append({'type': 'ATM CE', 'key': get_key(atm, 'CE'), 'side': 1, 'is_expired': is_expired})
-        legs.append({'type': 'ATM PE', 'key': get_key(atm, 'PE'), 'side': 1, 'is_expired': is_expired})
-    elif strategy == "Options: Bull Put Spread (ATM & OTM1)":
-        legs.append({'type': 'ATM PE', 'key': get_key(atm, 'PE'), 'side': -1, 'is_expired': is_expired})
-        legs.append({'type': 'OTM1 PE', 'key': get_key(otm1_pe, 'PE'), 'side': 1, 'is_expired': is_expired})
-    elif strategy == "Options: Bull Put Spread (ATM & OTM2)":
-        legs.append({'type': 'ATM PE', 'key': get_key(atm, 'PE'), 'side': -1, 'is_expired': is_expired})
-        legs.append({'type': 'OTM2 PE', 'key': get_key(otm2_pe, 'PE'), 'side': 1, 'is_expired': is_expired})
-    elif strategy == "Options: Bear Call Spread (ATM & OTM1)":
-        legs.append({'type': 'ATM CE', 'key': get_key(atm, 'CE'), 'side': -1, 'is_expired': is_expired})
-        legs.append({'type': 'OTM1 CE', 'key': get_key(otm1_ce, 'CE'), 'side': 1, 'is_expired': is_expired})
-    elif strategy == "Options: Bear Call Spread (ATM & OTM2)":
-        legs.append({'type': 'ATM CE', 'key': get_key(atm, 'CE'), 'side': -1, 'is_expired': is_expired})
-        legs.append({'type': 'OTM2 CE', 'key': get_key(otm2_ce, 'CE'), 'side': 1, 'is_expired': is_expired})
-    
-    # NEW STRATEGY MAPPING ADDED HERE
-    elif strategy == "Bull Put Spread (OTM2 Sell & OTM4 Buy)":
+    if strategy == "Bull Put Spread (OTM2 Sell & OTM4 Buy)":
         legs.append({'type': 'OTM2 PE (Sell)', 'key': get_key(otm2_pe, 'PE'), 'side': -1, 'is_expired': is_expired})
         legs.append({'type': 'OTM4 PE (Buy)', 'key': get_key(otm4_pe, 'PE'), 'side': 1, 'is_expired': is_expired})
         
-    return [l for l in legs if l['key'] is not None]# Upstox API & Data Layer (Paste your robust code here)
+    return [l for l in legs if l['key'] is not None]
