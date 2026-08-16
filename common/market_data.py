@@ -43,7 +43,6 @@ def get_nfo_lot_size(symbol):
     if df.empty: return 1
     
     symbol_upper = symbol.upper()
-    # Map for lot size
     if symbol_upper == 'NIFTY': symbol_upper = 'NIFTY 50'
     elif symbol_upper == 'BANKNIFTY': symbol_upper = 'NIFTY BANK'
     elif symbol_upper == 'SENSEX': symbol_upper = 'BSX'
@@ -63,9 +62,7 @@ def get_nfo_lot_size(symbol):
 def fetch_upstox_intraday_candles(symbol_or_key, start_dt, end_dt, access_token, interval="1minute", is_key=False, is_expired=False, log_func=print):
     if not is_key:
         instrument_key = get_upstox_key(symbol_or_key)
-        log_func(f"🔍 [DEBUG SPOT] Resolved {symbol_or_key} to API Key: {instrument_key}")
-        if not instrument_key:
-            return pd.DataFrame()
+        if not instrument_key: return pd.DataFrame()
     else:
         instrument_key = symbol_or_key
 
@@ -96,18 +93,12 @@ def fetch_upstox_intraday_candles(symbol_or_key, start_dt, end_dt, access_token,
             response = requests.get(url, headers=headers, timeout=10)
             if response.status_code == 200:
                 candles = response.json().get("data", {}).get("candles", [])
-                if not is_key: log_func(f"   ✅ [DEBUG SPOT] Fetched chunk {chunk_start.date()} ({len(candles)} candles)")
                 if candles: all_candles.extend(candles)
-            else:
-                if not is_key: log_func(f"   ❌ [DEBUG SPOT] API Error {response.status_code} for chunk {chunk_start.date()}: {response.text}")
-        except Exception as e:
-            if not is_key: log_func(f"   ❌ [DEBUG SPOT] Network Exception: {str(e)}")
-        
+        except Exception:
+            pass
         chunk_start = chunk_end + timedelta(days=1)
 
-    if not all_candles: 
-        if not is_key: log_func(f"⚠️ [DEBUG SPOT] No Spot data retrieved across all chunks.")
-        return pd.DataFrame()
+    if not all_candles: return pd.DataFrame()
         
     df = pd.DataFrame(all_candles, columns=["timestamp", "open", "high", "low", "close", "volume", "oi"])
     df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_convert(pytz.timezone("Asia/Kolkata")).dt.tz_localize(None)
@@ -115,7 +106,7 @@ def fetch_upstox_intraday_candles(symbol_or_key, start_dt, end_dt, access_token,
     return df
 
 def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, chain_cache=None, log_func=print):
-    log_func(f"🔍 [DEBUG OPTIONS] Starting leg resolution for {symbol} at {entry_time} (Spot: {entry_price})")
+    log_func(f"🔍 [DEBUG OPTIONS] Starting leg resolution for {symbol} at {entry_time}")
     df_inst = get_instrument_df()
     if df_inst.empty: return []
     
@@ -129,28 +120,43 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
         is_expired = cached_data['is_expired']
     else:
         eq_key = get_upstox_key(symbol)
-        if not eq_key:
-            log_func(f"⚠️ [DEBUG OPTIONS] No underlying instrument found for Options chain.")
-            return []
+        if not eq_key: return []
             
         safe_eq_key = urllib.parse.quote(eq_key)
         headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
         
         spot_sym = symbol.upper()
-        if spot_sym == 'NIFTY': spot_sym = 'NIFTY 50'
-        elif spot_sym == 'BANKNIFTY': spot_sym = 'NIFTY BANK'
-        elif spot_sym == 'FINNIFTY': spot_sym = 'NIFTY FIN SERVICE'
-        elif spot_sym == 'SENSEX': spot_sym = 'BSX'  
-        elif spot_sym == 'BANKEX': spot_sym = 'BKX'  
         
-        log_func(f"🔍 [DEBUG OPTIONS] Mapped to Options Underlying Symbol: {spot_sym}")
+        # 🚨 DEEP DEBUG: Print raw BSE_FO samples to find the hidden naming convention
+        if spot_sym == 'SENSEX':
+            bse_fo_sample = df_inst[df_inst['exchange'] == 'BSE_FO'].head(5)
+            log_func(f"🚨 [DEEP DEBUG] BSE_FO Sample Rows:")
+            for _, row in bse_fo_sample.iterrows():
+                u_sym = row.get('underlying_symbol', 'N/A')
+                log_func(f"   -> tradingsymbol: {row.get('tradingsymbol')}, name: {row.get('name')}, underlying: {u_sym}")
+        
+        # Try multiple SENSEX aliases
+        if spot_sym == 'NIFTY': search_syms = ['NIFTY 50', 'NIFTY']
+        elif spot_sym == 'BANKNIFTY': search_syms = ['NIFTY BANK', 'BANKNIFTY']
+        elif spot_sym == 'FINNIFTY': search_syms = ['NIFTY FIN SERVICE', 'FINNIFTY']
+        elif spot_sym == 'SENSEX': search_syms = ['SENSEX', 'BSX', 'BSE SENSEX']
+        elif spot_sym == 'BANKEX': search_syms = ['BANKEX', 'BKX']
+        else: search_syms = [spot_sym]
+        
         valid_fo_exchanges = ['NSE_FO', 'BSE_FO']
+        opts_active = pd.DataFrame()
         
-        if 'underlying_symbol' in df_inst.columns:
-            opts_active = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == spot_sym)]
-        else:
-            opts_active = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & ((df_inst['name'] == spot_sym) | (df_inst['tradingsymbol'].str.startswith(spot_sym)))]
+        for s_sym in search_syms:
+            if 'underlying_symbol' in df_inst.columns:
+                temp_opts = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == s_sym)]
+            else:
+                temp_opts = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & ((df_inst['name'] == s_sym) | (df_inst['tradingsymbol'].str.startswith(s_sym)))]
             
+            if not temp_opts.empty:
+                opts_active = temp_opts
+                log_func(f"🔍 [DEBUG OPTIONS] Success! Matched Options using string: '{s_sym}'")
+                break
+                
         active_expiries = pd.to_datetime(opts_active['expiry'], errors='coerce').dt.date.dropna().unique().tolist() if not opts_active.empty else []
             
         expired_expiries = []
@@ -189,10 +195,12 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
                         if 'trading_symbol' in chain_df.columns: chain_df.rename(columns={'trading_symbol': 'tradingsymbol'}, inplace=True)
             except Exception: pass
         else:
+            # Match the exact string that worked above
+            matched_sym = s_sym if not opts_active.empty else spot_sym
             if 'underlying_symbol' in df_inst.columns:
-                chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == spot_sym) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
+                chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == matched_sym) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
             else:
-                chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['tradingsymbol'].str.startswith(spot_sym)) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
+                chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['tradingsymbol'].str.startswith(matched_sym)) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
 
         if chain_cache is not None:
             chain_cache[cache_key] = {'df': chain_df, 'is_expired': is_expired, 'closest_expiry': closest_expiry}
@@ -215,7 +223,6 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
         otm4_pe = unique_strikes[max(0, closest_idx - 4)]
         log_func(f"✅ [DEBUG OPTIONS] Mapped Strikes -> OTM2 PE: {otm2_pe}, OTM4 PE: {otm4_pe}")
     except Exception as e:
-        log_func(f"⚠️ [DEBUG OPTIONS] Error resolving strikes: {e}")
         return [] 
 
     def get_key(s, opt_type):
