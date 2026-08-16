@@ -22,23 +22,26 @@ def get_instrument_df():
         return pd.DataFrame()
 
 def get_upstox_key(symbol):
+    """Bulletproof instrument key resolution bypassing fragile CSV column mismatches."""
+    sym_upper = symbol.upper()
+    
+    # 1. Hardcode major indices (Fastest & 100% reliable)
+    index_keys = {
+        'NIFTY': 'NSE_INDEX|Nifty 50',
+        'BANKNIFTY': 'NSE_INDEX|Nifty Bank',
+        'FINNIFTY': 'NSE_INDEX|Nifty Fin Service',
+        'SENSEX': 'BSE_INDEX|SENSEX',
+        'BANKEX': 'BSE_INDEX|BANKEX',
+        'MIDCPNIFTY': 'NSE_INDEX|NIFTY MID SELECT'
+    }
+    
+    if sym_upper in index_keys:
+        return index_keys[sym_upper]
+        
+    # 2. Fallback to Equity Search for stocks (e.g., RELIANCE)
     df = get_instrument_df()
     if df.empty: return None
     
-    sym_upper = symbol.upper()
-    search_sym = sym_upper
-    
-    # Standardize names for Index lookup
-    if search_sym == 'NIFTY': search_sym = 'NIFTY 50'
-    elif search_sym == 'BANKNIFTY': search_sym = 'NIFTY BANK'
-    elif search_sym == 'FINNIFTY': search_sym = 'NIFTY FIN SERVICE'
-
-    # 1. Dynamic Case-Insensitive Index Search (Solves SENSEX casing issues)
-    idx_rows = df[(df['exchange'].isin(['NSE_INDEX', 'BSE_INDEX'])) & (df['tradingsymbol'].str.upper() == search_sym)]
-    if not idx_rows.empty:
-        return idx_rows.iloc[0]['instrument_key']
-        
-    # 2. Fallback to Equity Search
     eq_rows = df[(df['exchange'].isin(['NSE_EQ', 'BSE_EQ'])) & (df['tradingsymbol'].str.upper() == sym_upper)]
     if not eq_rows.empty:
         return eq_rows.iloc[0]['instrument_key']
@@ -136,10 +139,6 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
         headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
         
         spot_sym = symbol.upper()
-        if spot_sym == 'NIFTY': spot_sym = 'NIFTY 50'
-        elif spot_sym == 'BANKNIFTY': spot_sym = 'NIFTY BANK'
-        elif spot_sym == 'FINNIFTY': spot_sym = 'NIFTY FIN SERVICE'
-        
         valid_fo_exchanges = ['NSE_FO', 'BSE_FO']
         
         if 'underlying_symbol' in df_inst.columns:
