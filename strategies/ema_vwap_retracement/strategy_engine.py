@@ -51,6 +51,7 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
         entries = []
         lot_size = get_nfo_lot_size(symbol)
         
+        # Start at index 1 to ensure we have a previous candle for volume comparison
         for j in range(1, len(df_3m) - 1):
             c_time = df_3m.loc[j, 'timestamp']
             if c_time < start_dt or c_time > end_dt:
@@ -63,26 +64,35 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             ema9_15 = curr_15m['EMA_9']
             ema21_15 = curr_15m['EMA_21']
             
+            c_open = df_3m.loc[j, 'open']
             c_low = df_3m.loc[j, 'low']
             c_high = df_3m.loc[j, 'high']
             c_close = df_3m.loc[j, 'close']
             c_ema9 = df_3m.loc[j, 'EMA_9']
             c_vwap = df_3m.loc[j, 'VWAP']
+            c_vol = df_3m.loc[j, 'volume']
+            p_vol = df_3m.loc[j-1, 'volume']
             
+            # --- Bullish Conditions (PE Spread) ---
             is_bullish_trend = ema9_15 > ema21_15
             bullish_retracement = (c_low < c_ema9 or c_low < c_vwap) and (c_close > c_ema9 or c_close > c_vwap)
+            # New Rules: Close > Open (Green Candle) AND Volume Surge
+            bullish_candle_reqs = (c_close > c_open) and (c_vol > p_vol)
             
+            # --- Bearish Conditions (CE Spread) ---
             is_bearish_trend = ema9_15 < ema21_15
             bearish_retracement = (c_high > c_ema9 or c_high > c_vwap) and (c_close < c_ema9 or c_close < c_vwap)
+            # New Rules: Close < Open (Red Candle) AND Volume Surge
+            bearish_candle_reqs = (c_close < c_open) and (c_vol > p_vol)
             
-            if is_bullish_trend and bullish_retracement:
+            if is_bullish_trend and bullish_retracement and bullish_candle_reqs:
                 entries.append({
                     'time': df_3m.loc[j+1, 'timestamp'],
                     'price': df_3m.loc[j+1, 'open'],
                     'type': 'PE_SPREAD',
                     '3m_idx': j+1
                 })
-            elif is_bearish_trend and bearish_retracement:
+            elif is_bearish_trend and bearish_retracement and bearish_candle_reqs:
                 entries.append({
                     'time': df_3m.loc[j+1, 'timestamp'],
                     'price': df_3m.loc[j+1, 'open'],
@@ -130,7 +140,6 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             initial_net_credit = (leg1_entry * 1) - (leg2_entry * 1)
             if initial_net_credit <= 0: continue
 
-            # Capital Employed = Spread Width * Lot Size
             spread_width = abs(legs[0]['strike'] - legs[1]['strike'])
             capital_employed = spread_width * lot_size
 
