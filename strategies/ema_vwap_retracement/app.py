@@ -40,8 +40,8 @@ def run_ema_vwap_app():
         "OTM 6 (6 Strikes OTM)": 6
     }
     
-    selected_sell_label = st.sidebar.selectbox("Sell Leg Offset", list(sell_offset_map.keys()), index=2) # Default OTM2
-    selected_buy_label = st.sidebar.selectbox("Buy Hedge Leg Offset", list(buy_offset_map.keys()), index=3) # Default OTM4
+    selected_sell_label = st.sidebar.selectbox("Sell Leg Offset", list(sell_offset_map.keys()), index=2)
+    selected_buy_label = st.sidebar.selectbox("Buy Hedge Leg Offset", list(buy_offset_map.keys()), index=3)
     
     sell_offset = sell_offset_map[selected_sell_label]
     buy_offset = buy_offset_map[selected_buy_label]
