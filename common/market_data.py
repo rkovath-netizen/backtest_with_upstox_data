@@ -137,9 +137,15 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
             
         safe_eq_key = urllib.parse.quote(eq_key)
         headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
-        
         spot_sym = symbol.upper()
         valid_fo_exchanges = ['NSE_FO', 'BSE_FO']
+        
+        # ✅ FIX: Map Options Underlying Symbols correctly
+        if spot_sym == 'NIFTY': spot_sym = 'NIFTY 50'
+        elif spot_sym == 'BANKNIFTY': spot_sym = 'NIFTY BANK'
+        elif spot_sym == 'FINNIFTY': spot_sym = 'NIFTY FIN SERVICE'
+        elif spot_sym == 'SENSEX': spot_sym = 'BSX'  # BSE Options use BSX!
+        elif spot_sym == 'BANKEX': spot_sym = 'BKX'  # BSE Bank options use BKX!
         
         if 'underlying_symbol' in df_inst.columns:
             opts_active = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == spot_sym)]
