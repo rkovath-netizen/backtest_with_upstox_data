@@ -235,7 +235,7 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, cha
         return leg.iloc[0]['instrument_key'] if not leg.empty else None
 
     legs = []
-    if strategy == "Bull Put Spread (OTM2 Sell & OTM4 Buy)":
+        if "Bull Put Spread" in strategy:
         legs.append({'type': 'OTM2 PE (Sell)', 'key': get_key(otm2_pe, 'PE'), 'side': -1, 'is_expired': is_expired})
         legs.append({'type': 'OTM4 PE (Buy)', 'key': get_key(otm4_pe, 'PE'), 'side': 1, 'is_expired': is_expired})
         
