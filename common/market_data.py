@@ -158,24 +158,35 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, sel
         closest_expiry = future_expiries[0]
         is_expired = closest_expiry < current_date
         
-        chain_df = pd.DataFrame()
-        if is_expired:
+        def fetch_expired_chain():
             try:
                 time.sleep(0.3)
                 opt_url = f"https://api.upstox.com/v2/expired-instruments/option/contract?instrument_key={safe_eq_key}&expiry_date={closest_expiry.strftime('%Y-%m-%d')}"
                 res = requests.get(opt_url, headers=headers, timeout=10)
                 if res.status_code == 200:
                     contracts = res.json().get('data', [])
-                    chain_df = pd.DataFrame(contracts)
-                    if not chain_df.empty:
-                        if 'strike_price' in chain_df.columns: chain_df.rename(columns={'strike_price': 'strike'}, inplace=True)
-                        if 'trading_symbol' in chain_df.columns: chain_df.rename(columns={'trading_symbol': 'tradingsymbol'}, inplace=True)
+                    df = pd.DataFrame(contracts)
+                    if not df.empty:
+                        if 'strike_price' in df.columns: df.rename(columns={'strike_price': 'strike'}, inplace=True)
+                        if 'trading_symbol' in df.columns: df.rename(columns={'trading_symbol': 'tradingsymbol'}, inplace=True)
+                        return df
             except Exception: pass
+            return pd.DataFrame()
+
+        chain_df = pd.DataFrame()
+        if is_expired:
+            chain_df = fetch_expired_chain()
         else:
             if 'underlying_symbol' in df_inst.columns:
                 chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == spot_sym) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
             else:
                 chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['tradingsymbol'].str.startswith(spot_sym)) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
+            
+            # Weekend Limbo Fallback
+            if chain_df.empty:
+                chain_df = fetch_expired_chain()
+                if not chain_df.empty:
+                    is_expired = True
 
         if chain_cache is not None:
             chain_cache[cache_key] = {'df': chain_df, 'is_expired': is_expired, 'closest_expiry': closest_expiry}
@@ -193,7 +204,7 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, sel
         if "Bull Put" in strategy:
             strike_sell = unique_strikes[max(0, closest_idx - sell_offset)]
             strike_buy = unique_strikes[max(0, closest_idx - buy_offset)]
-        else: # Bear Call Spread
+        else: 
             strike_sell = unique_strikes[min(len(unique_strikes)-1, closest_idx + sell_offset)]
             strike_buy = unique_strikes[min(len(unique_strikes)-1, closest_idx + buy_offset)]
     except Exception:
