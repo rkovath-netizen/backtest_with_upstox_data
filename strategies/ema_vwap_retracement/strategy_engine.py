@@ -297,9 +297,9 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, progr
             log_func(f"⚡ [{symbol}] Executing {trade_type} at {entry_time} (Spot: {entry_price})")
 
             if trade_type == 'PE_SPREAD':
-                legs = get_option_legs_pe(symbol, entry_time, entry_price, "Bull Put Spread", upstox_token, chain_cache, log_func)
+                legs = get_option_legs(symbol, entry_time, entry_price, "Bull Put Spread", upstox_token, chain_cache, log_func)
             else:
-                legs = get_option_legs_ce(symbol, entry_time, entry_price, "Bear Call Spread", upstox_token, chain_cache, log_func)
+                legs = get_option_legs(symbol, entry_time, entry_price, "Bear Call Spread", upstox_token, chain_cache, log_func)
                 
             if len(legs) != 2:
                 log_func(f"⚠️ [{symbol}] Could not resolve option legs. Skipping.")
