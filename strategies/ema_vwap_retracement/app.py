@@ -1,10 +1,12 @@
 import streamlit as st
 import pandas as pd
 import time
+import pytz
 from datetime import datetime, timedelta
 from common.github_uploader import push_csv_to_github
 from .strategy_engine import process_ema_vwap_strategy
 from .live_engine import run_live_scan_cycle, load_live_log
+from common.market_schedule import is_market_open, get_next_market_open
 
 def run_ema_vwap_app():
     st.title("🌊 EMA & VWAP Quant Engine")
@@ -27,6 +29,8 @@ def run_ema_vwap_app():
     upstox_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", None)
     email_sender = st.secrets.get("EMAIL_SENDER", None)
     email_password = st.secrets.get("EMAIL_PASSWORD", None)
+    
+    ist_tz = pytz.timezone('Asia/Kolkata')
 
     if app_mode == "Historical Backtest":
         st.markdown("**(Dual Timeframe: 1h/15m Trend + 3m Retracement + Futures Data + Detailed Analytics)**")
@@ -38,7 +42,7 @@ def run_ema_vwap_app():
         if "ema_vwap_logs" not in st.session_state: st.session_state["ema_vwap_logs"] = []
 
         def ui_log(msg):
-            st.session_state["ema_vwap_logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            st.session_state["ema_vwap_logs"].append(f"[{datetime.now(ist_tz).strftime('%H:%M:%S')}] {msg}")
             log_box.code("\n".join(st.session_state["ema_vwap_logs"][-30:]), language="text")
         
         if st.button("🚀 Run Backtest"):
@@ -73,11 +77,11 @@ def run_ema_vwap_app():
             if not email_sender or not email_password:
                 st.warning("⚠️ Email secrets not configured. Alerts will log to screen but not send to your inbox.")
             st.session_state['live_running'] = True
+            st.session_state['sleeping_logged'] = False # Reset the sleep log flag
             
         if col2.button("⏹️ Stop Scanner"):
             st.session_state['live_running'] = False
             
-        # Display Live Log File
         st.markdown("#### 📂 Live Trade Database")
         live_df = load_live_log()
         if not live_df.empty:
@@ -91,18 +95,33 @@ def run_ema_vwap_app():
         if "live_scan_logs" not in st.session_state: st.session_state["live_scan_logs"] = []
 
         def live_ui_log(msg):
-            st.session_state["live_scan_logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            st.session_state["live_scan_logs"].append(f"[{datetime.now(ist_tz).strftime('%H:%M:%S')}] {msg}")
             log_box.code("\n".join(st.session_state["live_scan_logs"][-20:]), language="text")
 
-        # The Continuous Loop
         if st.session_state.get('live_running', False):
-            with st.spinner(f"Scanner active. Next market check at {(datetime.now() + timedelta(seconds=60)).strftime('%H:%M:%S')}..."):
-                run_live_scan_cycle(
-                    symbols=selected_symbols, upstox_token=upstox_token, 
-                    sell_offset=sell_offset, buy_offset=buy_offset,
-                    require_color=require_color, require_volume=require_volume, 
-                    require_obv_sma=require_obv_sma, require_1h_sma=require_1h_sma,
-                    email_sender=email_sender, email_password=email_password, log_func=live_ui_log
-                )
-                time.sleep(60) # Wait 1 minute
-                st.rerun() # Refresh the app to loop again and update the CSV viewer!
+            market_open, reason = is_market_open()
+            
+            if market_open:
+                st.session_state['sleeping_logged'] = False # Reset flag for next close
+                next_check = (datetime.now(ist_tz) + timedelta(seconds=60)).strftime('%I:%M:%S %p')
+                with st.spinner(f"Scanner active. Next market check at {next_check}..."):
+                    run_live_scan_cycle(
+                        symbols=selected_symbols, upstox_token=upstox_token, 
+                        sell_offset=sell_offset, buy_offset=buy_offset,
+                        require_color=require_color, require_volume=require_volume, 
+                        require_obv_sma=require_obv_sma, require_1h_sma=require_1h_sma,
+                        email_sender=email_sender, email_password=email_password, log_func=live_ui_log
+                    )
+                    time.sleep(60)
+                    st.rerun()
+            else:
+                next_open = get_next_market_open()
+                
+                # 🚨 Log exactly ONE message about entering deep sleep
+                if not st.session_state.get('sleeping_logged', False):
+                    live_ui_log(f"💤 Market Closed ({reason}). Deep sleep until {next_open.strftime('%d %b, %I:%M %p')}.")
+                    st.session_state['sleeping_logged'] = True
+                
+                with st.spinner(f"Market Closed ({reason}). Deep sleep until {next_open.strftime('%d %b, %I:%M %p')}..."):
+                    time.sleep(60) # Silent micro-sleep to keep Server/Stop button alive
+                    st.rerun()
