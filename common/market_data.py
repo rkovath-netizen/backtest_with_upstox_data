@@ -106,144 +106,8 @@ def fetch_upstox_intraday_candles(symbol_or_key, start_dt, end_dt, access_token,
     df = df.drop_duplicates(subset=['timestamp']).sort_values("timestamp").reset_index(drop=True)
     return df
 
-def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, sell_offset=2, buy_offset=4, chain_cache=None, log_func=print):
-    df_inst = get_instrument_df()
-    if df_inst.empty: return []
-    
-    entry_date = pd.to_datetime(entry_time).date()
-    current_date = pd.Timestamp.now(tz="Asia/Kolkata").date()
-    cache_key = f"{symbol}_{entry_date}_{strategy}_{sell_offset}_{buy_offset}"
-    
-    if chain_cache is not None and cache_key in chain_cache:
-        cached_data = chain_cache[cache_key]
-        chain_df = cached_data['df']
-        is_expired = cached_data['is_expired']
-    else:
-        eq_key = get_upstox_key(symbol)
-        if not eq_key: return []
-            
-        safe_eq_key = urllib.parse.quote(eq_key)
-        headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
-        
-        spot_sym = symbol.upper()
-        if spot_sym == 'NIFTY': spot_sym = 'NIFTY 50'
-        elif spot_sym == 'BANKNIFTY': spot_sym = 'NIFTY BANK'
-        elif spot_sym == 'FINNIFTY': spot_sym = 'NIFTY FIN SERVICE'
-        elif spot_sym == 'SENSEX': spot_sym = 'BSX'
-        elif spot_sym == 'BANKEX': spot_sym = 'BKX'
-        
-        valid_fo_exchanges = ['NSE_FO', 'BSE_FO']
-        
-        if 'underlying_symbol' in df_inst.columns:
-            opts_active = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == spot_sym)]
-        else:
-            opts_active = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & ((df_inst['name'] == spot_sym) | (df_inst['tradingsymbol'].str.startswith(spot_sym)))]
-            
-        active_expiries = pd.to_datetime(opts_active['expiry'], errors='coerce').dt.date.dropna().unique().tolist() if not opts_active.empty else []
-            
-        expired_expiries = []
-        try:
-            time.sleep(0.3)
-            exp_url = f"https://api.upstox.com/v2/expired-instruments/expiries?instrument_key={safe_eq_key}"
-            res = requests.get(exp_url, headers=headers, timeout=10)
-            if res.status_code == 200:
-                data = res.json().get('data', [])
-                expired_expiries = [pd.to_datetime(d).date() for d in data]
-        except Exception: pass 
-
-        all_expiries = sorted(list(set(active_expiries + expired_expiries)))
-        future_expiries = [d for d in all_expiries if d >= entry_date]
-        if not future_expiries: return []
-            
-        closest_expiry = future_expiries[0]
-        is_expired = closest_expiry < current_date
-        
-        def fetch_expired_chain():
-            try:
-                time.sleep(0.3)
-                opt_url = f"https://api.upstox.com/v2/expired-instruments/option/contract?instrument_key={safe_eq_key}&expiry_date={closest_expiry.strftime('%Y-%m-%d')}"
-                res = requests.get(opt_url, headers=headers, timeout=10)
-                if res.status_code == 200:
-                    contracts = res.json().get('data', [])
-                    df = pd.DataFrame(contracts)
-                    if not df.empty:
-                        if 'strike_price' in df.columns: df.rename(columns={'strike_price': 'strike'}, inplace=True)
-                        if 'trading_symbol' in df.columns: df.rename(columns={'trading_symbol': 'tradingsymbol'}, inplace=True)
-                        return df
-            except Exception: pass
-            return pd.DataFrame()
-
-        chain_df = pd.DataFrame()
-        if is_expired:
-            chain_df = fetch_expired_chain()
-        else:
-            if 'underlying_symbol' in df_inst.columns:
-                chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == spot_sym) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
-            else:
-                chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['tradingsymbol'].str.startswith(spot_sym)) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
-            
-            # Weekend Limbo Fallback
-            if chain_df.empty:
-                chain_df = fetch_expired_chain()
-                if not chain_df.empty:
-                    is_expired = True
-
-        if chain_cache is not None:
-            chain_cache[cache_key] = {'df': chain_df, 'is_expired': is_expired, 'closest_expiry': closest_expiry}
-
-    if chain_df.empty: return []
-
-    chain_df['strike'] = pd.to_numeric(chain_df['strike'], errors='coerce')
-    chain_df = chain_df.dropna(subset=['strike'])
-    unique_strikes = sorted(chain_df['strike'].unique())
-    if not unique_strikes: return []
-        
-    closest_idx = min(range(len(unique_strikes)), key=lambda i: abs(unique_strikes[i] - entry_price))
-    
-    try:
-        if "Bull Put" in strategy:
-            strike_sell = unique_strikes[max(0, closest_idx - sell_offset)]
-            strike_buy = unique_strikes[max(0, closest_idx - buy_offset)]
-        else: 
-            strike_sell = unique_strikes[min(len(unique_strikes)-1, closest_idx + sell_offset)]
-            strike_buy = unique_strikes[min(len(unique_strikes)-1, closest_idx + buy_offset)]
-    except Exception:
-        return [] 
-
-    # 🚨 Extract historical lot size directly from the API response
-    def get_leg_data(s, o_type):
-        target_strike = float(s)
-        col_type = 'option_type' if 'option_type' in chain_df.columns else 'instrument_type'
-        leg = chain_df[
-            (abs(chain_df['strike'] - target_strike) < 0.05) & 
-            ((chain_df[col_type] == o_type) | (chain_df['tradingsymbol'].astype(str).str.endswith(o_type)))
-        ]
-        if not leg.empty:
-            row = leg.iloc[0]
-            ls = 1
-            if 'lot_size' in row and pd.notna(row['lot_size']):
-                ls = int(row['lot_size'])
-            return row['instrument_key'], ls
-        return None, 1
-
-    legs = []
-    if "Bull Put" in strategy:
-        k_sell, ls_sell = get_leg_data(strike_sell, 'PE')
-        k_buy, ls_buy = get_leg_data(strike_buy, 'PE')
-        legs.append({'type': f'OTM{sell_offset} PE (Sell)', 'strike': strike_sell, 'key': k_sell, 'lot_size': ls_sell, 'side': -1, 'is_expired': is_expired})
-        legs.append({'type': f'OTM{buy_offset} PE (Buy)', 'strike': strike_buy, 'key': k_buy, 'lot_size': ls_buy, 'side': 1, 'is_expired': is_expired})
-    elif "Bear Call" in strategy:
-        k_sell, ls_sell = get_leg_data(strike_sell, 'CE')
-        k_buy, ls_buy = get_leg_data(strike_buy, 'CE')
-        legs.append({'type': f'OTM{sell_offset} CE (Sell)', 'strike': strike_sell, 'key': k_sell, 'lot_size': ls_sell, 'side': -1, 'is_expired': is_expired})
-        legs.append({'type': f'OTM{buy_offset} CE (Buy)', 'strike': strike_buy, 'key': k_buy, 'lot_size': ls_buy, 'side': 1, 'is_expired': is_expired})
-        
-    return [l for l in legs if l['key'] is not None]
-
 def fetch_continuous_futures_candles(symbol, start_dt, end_dt, access_token, interval="1minute", log_func=print):
-    """Automatically finds the active front-month future and fetches its historical data."""
     df_inst = get_instrument_df()
-    
     fut_name = symbol.upper()
     valid_fo_exchanges = ['NSE_FO', 'BSE_FO']
     
@@ -268,11 +132,98 @@ def fetch_continuous_futures_candles(symbol, start_dt, end_dt, access_token, int
     current_date = pd.Timestamp.now(tz="Asia/Kolkata").tz_localize(None)
     future_contracts = futures_active[pd.to_datetime(futures_active['expiry'], errors='coerce').dt.tz_localize(None) >= current_date]
     
-    if future_contracts.empty:
-        future_contracts = futures_active
+    if future_contracts.empty: future_contracts = futures_active
         
     future_contracts = future_contracts.sort_values(by='expiry')
     front_month_key = future_contracts.iloc[0]['instrument_key']
     log_func(f"🔍 Using Active Front-Month Future for {symbol}: {future_contracts.iloc[0]['tradingsymbol']}")
     
     return fetch_upstox_intraday_candles(front_month_key, start_dt, end_dt, access_token, interval, is_key=True, is_expired=False, log_func=log_func)
+
+def get_target_option_chain(symbol, target_date, access_token, chain_cache=None):
+    """
+    Pure Data Function: Fetches the closest raw option chain (active or expired) for a symbol on a specific date.
+    Returns: (chain_df, is_expired_boolean)
+    """
+    df_inst = get_instrument_df()
+    if df_inst.empty: return pd.DataFrame(), False
+    
+    current_date = pd.Timestamp.now(tz="Asia/Kolkata").date()
+    cache_key = f"{symbol}_{target_date}"
+    
+    if chain_cache is not None and cache_key in chain_cache:
+        return chain_cache[cache_key]['df'], chain_cache[cache_key]['is_expired']
+
+    eq_key = get_upstox_key(symbol)
+    if not eq_key: return pd.DataFrame(), False
+        
+    safe_eq_key = urllib.parse.quote(eq_key)
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
+    
+    spot_sym = symbol.upper()
+    if spot_sym == 'NIFTY': spot_sym = 'NIFTY 50'
+    elif spot_sym == 'BANKNIFTY': spot_sym = 'NIFTY BANK'
+    elif spot_sym == 'FINNIFTY': spot_sym = 'NIFTY FIN SERVICE'
+    elif spot_sym == 'SENSEX': spot_sym = 'BSX'
+    elif spot_sym == 'BANKEX': spot_sym = 'BKX'
+    
+    valid_fo_exchanges = ['NSE_FO', 'BSE_FO']
+    if 'underlying_symbol' in df_inst.columns:
+        opts_active = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == spot_sym)]
+    else:
+        opts_active = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & ((df_inst['name'] == spot_sym) | (df_inst['tradingsymbol'].str.startswith(spot_sym)))]
+        
+    active_expiries = pd.to_datetime(opts_active['expiry'], errors='coerce').dt.date.dropna().unique().tolist() if not opts_active.empty else []
+        
+    expired_expiries = []
+    try:
+        time.sleep(0.3)
+        res = requests.get(f"https://api.upstox.com/v2/expired-instruments/expiries?instrument_key={safe_eq_key}", headers=headers, timeout=10)
+        if res.status_code == 200:
+            expired_expiries = [pd.to_datetime(d).date() for d in res.json().get('data', [])]
+    except Exception: pass 
+
+    all_expiries = sorted(list(set(active_expiries + expired_expiries)))
+    future_expiries = [d for d in all_expiries if d >= target_date]
+    
+    if not future_expiries: return pd.DataFrame(), False
+        
+    closest_expiry = future_expiries[0]
+    is_expired = closest_expiry < current_date
+    
+    def fetch_expired_chain():
+        try:
+            time.sleep(0.3)
+            opt_url = f"https://api.upstox.com/v2/expired-instruments/option/contract?instrument_key={safe_eq_key}&expiry_date={closest_expiry.strftime('%Y-%m-%d')}"
+            res = requests.get(opt_url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                contracts = res.json().get('data', [])
+                df = pd.DataFrame(contracts)
+                if not df.empty:
+                    if 'strike_price' in df.columns: df.rename(columns={'strike_price': 'strike'}, inplace=True)
+                    if 'trading_symbol' in df.columns: df.rename(columns={'trading_symbol': 'tradingsymbol'}, inplace=True)
+                    return df
+        except Exception: pass
+        return pd.DataFrame()
+
+    chain_df = pd.DataFrame()
+    if is_expired:
+        chain_df = fetch_expired_chain()
+    else:
+        if 'underlying_symbol' in df_inst.columns:
+            chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['underlying_symbol'] == spot_sym) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
+        else:
+            chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['tradingsymbol'].str.startswith(spot_sym)) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
+        
+        if chain_df.empty:
+            chain_df = fetch_expired_chain()
+            if not chain_df.empty: is_expired = True
+
+    if not chain_df.empty:
+        chain_df['strike'] = pd.to_numeric(chain_df['strike'], errors='coerce')
+        chain_df = chain_df.dropna(subset=['strike'])
+
+    if chain_cache is not None:
+        chain_cache[cache_key] = {'df': chain_df, 'is_expired': is_expired}
+
+    return chain_df, is_expired
