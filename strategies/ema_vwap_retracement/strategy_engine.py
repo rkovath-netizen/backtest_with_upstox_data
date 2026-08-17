@@ -20,7 +20,6 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
         end_dt = datetime.combine(end_date, datetime.max.time())
         warmup_start = start_dt - timedelta(days=15)
         
-        # 🚨 NEW: Fetching continuous Futures data instead of Spot data
         spot_1m = fetch_continuous_futures_candles(symbol, warmup_start, end_dt, upstox_token, log_func=log_func)
         if spot_1m.empty:
             log_func(f"❌ Failed to fetch futures data for {symbol}. Skipping.")
@@ -165,7 +164,11 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             leg1_entry = get_premium_at_time(leg_data[0]['df'], entry_time)
             leg2_entry = get_premium_at_time(leg_data[1]['df'], entry_time)
             initial_net_credit = (leg1_entry * 1) - (leg2_entry * 1)
-            if initial_net_credit <= 0: continue
+            
+            # 🚨 NEW FILTER: Prevent entering low-reward trades with negligible credit
+            if initial_net_credit < 15.0:
+                log_func(f"⚠️ [{symbol}] Net credit (₹{initial_net_credit:.2f}) too low. Skipping.")
+                continue
 
             spread_width = abs(legs[0]['strike'] - legs[1]['strike'])
             capital_employed = spread_width * lot_size
@@ -197,8 +200,9 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
                 current_spread_val = l1_curr - l2_curr
                 current_pnl_per_qty = initial_net_credit - current_spread_val
                 
+                # 🚨 NEW FILTER: Asymmetric Risk/Reward. 50% Profit vs 100% Stop Loss limit.
                 target_hit = current_pnl_per_qty >= (0.50 * initial_net_credit)
-                sl_hit = current_pnl_per_qty <= (-0.50 * initial_net_credit)
+                sl_hit = current_pnl_per_qty <= (-1.00 * initial_net_credit)
 
                 if target_hit:
                     exit_reason = "Target Hit (50% Premium Decay)"
@@ -206,7 +210,7 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
                     exit_bar_step = step
                     break
                 elif sl_hit:
-                    exit_reason = "SL Hit (50% Premium Appreciation)"
+                    exit_reason = "SL Hit (100% Premium Appreciation)"
                     exit_time = curr_time
                     exit_bar_step = step
                     break
