@@ -3,7 +3,8 @@ import json
 import pandas as pd
 import pandas_ta as ta
 from datetime import datetime, timedelta
-from common.market_data import fetch_continuous_futures_candles, fetch_upstox_intraday_candles, get_option_legs, get_nfo_lot_size
+from common.market_data import fetch_continuous_futures_candles, fetch_upstox_intraday_candles
+from common.options_builder import build_spread_legs
 from common.notifications import send_trade_email
 
 LOG_FILE = "live_trade_log.csv"
@@ -149,7 +150,9 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
             
         if trade_type:
             strat_name = "Bull Put Spread" if trade_type == 'PE_SPREAD' else "Bear Call Spread"
-            legs = get_option_legs(symbol, c_time, c_close, strat_name, upstox_token, sell_offset=sell_offset, buy_offset=buy_offset)
+            
+            # 🚀 Clean architectural call to options_builder
+            legs = build_spread_legs(symbol, c_time, c_close, strat_name, upstox_token, sell_offset=sell_offset, buy_offset=buy_offset)
             
             if len(legs) == 2:
                 l1_curr = get_latest_close(legs[0]['key'], True, upstox_token)
@@ -157,7 +160,7 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
                 net_credit = l1_curr - l2_curr
                 
                 if net_credit >= 15.0:
-                    lot_size = legs[0].get('lot_size', get_nfo_lot_size(symbol))
+                    lot_size = legs[0]['lot_size']
                     cap_emp = abs(legs[0]['strike'] - legs[1]['strike']) * lot_size
                     
                     new_trade = {
