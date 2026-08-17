@@ -141,10 +141,6 @@ def fetch_continuous_futures_candles(symbol, start_dt, end_dt, access_token, int
     return fetch_upstox_intraday_candles(front_month_key, start_dt, end_dt, access_token, interval, is_key=True, is_expired=False, log_func=log_func)
 
 def get_target_option_chain(symbol, target_date, access_token, chain_cache=None):
-    """
-    Pure Data Function: Fetches the closest raw option chain (active or expired) for a symbol on a specific date.
-    Returns: (chain_df, is_expired_boolean)
-    """
     df_inst = get_instrument_df()
     if df_inst.empty: return pd.DataFrame(), False
     
@@ -227,3 +223,52 @@ def get_target_option_chain(symbol, target_date, access_token, chain_cache=None)
         chain_cache[cache_key] = {'df': chain_df, 'is_expired': is_expired}
 
     return chain_df, is_expired
+
+# Restored legacy support for older modules
+def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, sell_offset=2, buy_offset=4, chain_cache=None, log_func=print):
+    chain_df, is_expired = get_target_option_chain(symbol, pd.to_datetime(entry_time).date(), access_token, chain_cache)
+    if chain_df.empty: return []
+
+    unique_strikes = sorted(chain_df['strike'].unique())
+    if not unique_strikes: return []
+        
+    closest_idx = min(range(len(unique_strikes)), key=lambda i: abs(unique_strikes[i] - entry_price))
+    
+    try:
+        if "Bull Put" in strategy:
+            strike_sell = unique_strikes[max(0, closest_idx - sell_offset)]
+            strike_buy = unique_strikes[max(0, closest_idx - buy_offset)]
+        else: 
+            strike_sell = unique_strikes[min(len(unique_strikes)-1, closest_idx + sell_offset)]
+            strike_buy = unique_strikes[min(len(unique_strikes)-1, closest_idx + buy_offset)]
+    except Exception:
+        return [] 
+
+    def get_key(s, o_type):
+        target_strike = float(s)
+        col_type = 'option_type' if 'option_type' in chain_df.columns else 'instrument_type'
+        leg = chain_df[
+            (abs(chain_df['strike'] - target_strike) < 0.05) & 
+            ((chain_df[col_type] == o_type) | (chain_df['tradingsymbol'].astype(str).str.endswith(o_type)))
+        ]
+        if not leg.empty:
+            row = leg.iloc[0]
+            ls = int(row['lot_size']) if 'lot_size' in row and pd.notna(row['lot_size']) else 1
+            return row['instrument_key'], ls
+        return None, 1
+
+    legs = []
+    if "Bull Put" in strategy:
+        k_sell, ls_sell = get_key(strike_sell, 'PE')
+        k_buy, ls_buy = get_key(strike_buy, 'PE')
+        if k_sell and k_buy:
+            legs.append({'type': f'OTM{sell_offset} PE (Sell)', 'strike': strike_sell, 'key': k_sell, 'lot_size': ls_sell, 'side': -1, 'is_expired': is_expired})
+            legs.append({'type': f'OTM{buy_offset} PE (Buy)', 'strike': strike_buy, 'key': k_buy, 'lot_size': ls_buy, 'side': 1, 'is_expired': is_expired})
+    elif "Bear Call" in strategy:
+        k_sell, ls_sell = get_key(strike_sell, 'CE')
+        k_buy, ls_buy = get_key(strike_buy, 'CE')
+        if k_sell and k_buy:
+            legs.append({'type': f'OTM{sell_offset} CE (Sell)', 'strike': strike_sell, 'key': k_sell, 'lot_size': ls_sell, 'side': -1, 'is_expired': is_expired})
+            legs.append({'type': f'OTM{buy_offset} CE (Buy)', 'strike': strike_buy, 'key': k_buy, 'lot_size': ls_buy, 'side': 1, 'is_expired': is_expired})
+            
+    return legs
