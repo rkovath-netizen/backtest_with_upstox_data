@@ -19,10 +19,6 @@ app_mode = st.sidebar.selectbox(
 
 # ... your other if statements ...
 
-elif app_mode == "📉 RSI Divergence Engine":
-    from strategies.rsi_divergence.app import run_rsi_divergence_app
-    run_rsi_divergence_app()
-
 if app_mode == "📈 Comparative Options Backtester":
     from strategies.comparative_options.app import run_comparative_options_app
     run_comparative_options_app()
