@@ -210,22 +210,33 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, sel
     except Exception:
         return [] 
 
-    def get_key(s, o_type):
+    # 🚨 Extract historical lot size directly from the API response
+    def get_leg_data(s, o_type):
         target_strike = float(s)
         col_type = 'option_type' if 'option_type' in chain_df.columns else 'instrument_type'
         leg = chain_df[
             (abs(chain_df['strike'] - target_strike) < 0.05) & 
             ((chain_df[col_type] == o_type) | (chain_df['tradingsymbol'].astype(str).str.endswith(o_type)))
         ]
-        return leg.iloc[0]['instrument_key'] if not leg.empty else None
+        if not leg.empty:
+            row = leg.iloc[0]
+            ls = 1
+            if 'lot_size' in row and pd.notna(row['lot_size']):
+                ls = int(row['lot_size'])
+            return row['instrument_key'], ls
+        return None, 1
 
     legs = []
     if "Bull Put" in strategy:
-        legs.append({'type': f'OTM{sell_offset} PE (Sell)', 'strike': strike_sell, 'key': get_key(strike_sell, 'PE'), 'side': -1, 'is_expired': is_expired})
-        legs.append({'type': f'OTM{buy_offset} PE (Buy)', 'strike': strike_buy, 'key': get_key(strike_buy, 'PE'), 'side': 1, 'is_expired': is_expired})
+        k_sell, ls_sell = get_leg_data(strike_sell, 'PE')
+        k_buy, ls_buy = get_leg_data(strike_buy, 'PE')
+        legs.append({'type': f'OTM{sell_offset} PE (Sell)', 'strike': strike_sell, 'key': k_sell, 'lot_size': ls_sell, 'side': -1, 'is_expired': is_expired})
+        legs.append({'type': f'OTM{buy_offset} PE (Buy)', 'strike': strike_buy, 'key': k_buy, 'lot_size': ls_buy, 'side': 1, 'is_expired': is_expired})
     elif "Bear Call" in strategy:
-        legs.append({'type': f'OTM{sell_offset} CE (Sell)', 'strike': strike_sell, 'key': get_key(strike_sell, 'CE'), 'side': -1, 'is_expired': is_expired})
-        legs.append({'type': f'OTM{buy_offset} CE (Buy)', 'strike': strike_buy, 'key': get_key(strike_buy, 'CE'), 'side': 1, 'is_expired': is_expired})
+        k_sell, ls_sell = get_leg_data(strike_sell, 'CE')
+        k_buy, ls_buy = get_leg_data(strike_buy, 'CE')
+        legs.append({'type': f'OTM{sell_offset} CE (Sell)', 'strike': strike_sell, 'key': k_sell, 'lot_size': ls_sell, 'side': -1, 'is_expired': is_expired})
+        legs.append({'type': f'OTM{buy_offset} CE (Buy)', 'strike': strike_buy, 'key': k_buy, 'lot_size': ls_buy, 'side': 1, 'is_expired': is_expired})
         
     return [l for l in legs if l['key'] is not None]
 
@@ -236,7 +247,6 @@ def fetch_continuous_futures_candles(symbol, start_dt, end_dt, access_token, int
     fut_name = symbol.upper()
     valid_fo_exchanges = ['NSE_FO', 'BSE_FO']
     
-    # Strictly map Futures instrument type (FUTIDX)
     if 'instrument_type' in df_inst.columns:
         futures_active = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & 
                                  (df_inst['name'] == fut_name) & 
@@ -247,7 +257,6 @@ def fetch_continuous_futures_candles(symbol, start_dt, end_dt, access_token, int
                                  (df_inst['tradingsymbol'].str.contains('FUT', na=False))]
                                  
     if futures_active.empty:
-        # Fallback to searching tradingsymbols directly (e.g. NIFTY24SEPFUT)
         futures_active = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & 
                                  (df_inst['tradingsymbol'].str.startswith(fut_name)) &
                                  (df_inst['tradingsymbol'].str.contains('FUT', na=False))]
