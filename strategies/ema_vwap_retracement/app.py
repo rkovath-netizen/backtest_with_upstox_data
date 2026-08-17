@@ -6,7 +6,7 @@ from .strategy_engine import process_ema_vwap_strategy
 
 def run_ema_vwap_app():
     st.title("🌊 EMA & VWAP Retracement Quant Scanner")
-    st.markdown("**(Dual Timeframe: 15m Trend + 3m Retracement + Configurable Spread Pairs + Detailed Analytics)**")
+    st.markdown("**(Dual Timeframe: 1h/15m Trend + 3m Retracement + Futures Data + Detailed Analytics)**")
 
     st.sidebar.header("⚙️ Strategy Configuration")
     strategy_name = st.sidebar.text_input("Report Name", value="ema_vwap_retracement_scan")
@@ -19,10 +19,11 @@ def run_ema_vwap_app():
     )
     
     st.sidebar.markdown("### 🧪 Testing Filters (Entry Conditions)")
-    require_color = st.sidebar.checkbox("Require Trend Candle Color", value=False, help="Bullish: Close > Open (Green). Bearish: Close < Open (Red).")
-    require_volume = st.sidebar.checkbox("Require Volume Surge", value=False, help="Current 3m Volume > Previous 3m Volume (Warning: Spot Indices often lack reliable volume data).")
+    require_color = st.sidebar.checkbox("Require Trend Candle Color", value=True, help="Bullish: Close > Open (Green). Bearish: Close < Open (Red).")
+    require_volume = st.sidebar.checkbox("Require Volume Surge", value=True, help="Current 3m Volume > Previous 3m Volume")
+    require_obv_sma = st.sidebar.checkbox("Require 15m OBV > 15m OBV SMA 20", value=True)
+    require_1h_sma = st.sidebar.checkbox("Require 1h Close > 1h SMA 20", value=True)
 
-    # Dynamic Strike Selectors
     st.sidebar.markdown("### 🎯 Option Strike Configuration")
     sell_offset_map = {
         "ATM (0 Strikes OTM)": 0,
@@ -92,13 +93,14 @@ def run_ema_vwap_app():
             buy_offset=buy_offset,
             require_color=require_color,
             require_volume=require_volume,
+            require_obv_sma=require_obv_sma,
+            require_1h_sma=require_1h_sma,
             progress_callback=update_progress,
             log_func=ui_log
         )
 
         st.session_state["ema_vwap_trades_df"] = trades_df
 
-    # Persistent Summary Dashboard
     if "ema_vwap_trades_df" in st.session_state:
         trades_df = st.session_state["ema_vwap_trades_df"]
         if trades_df.empty:
