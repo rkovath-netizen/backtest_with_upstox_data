@@ -31,7 +31,7 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
                         email_sender, email_password, log_func):
     
     log_df = load_live_log()
-    receiver_email = "ramko199@gmail.com"
+    receiver_email = "ramkov199@gmail.com"
     
     for symbol in symbols:
         log_func(f"🔄 Polling {symbol} Live Market Data...")
