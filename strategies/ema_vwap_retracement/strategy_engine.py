@@ -62,7 +62,7 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
         df_3m = df_3m.reset_index()
         
         entries = []
-        lot_size = get_nfo_lot_size(symbol)
+        fallback_lot_size = get_nfo_lot_size(symbol)
         
         for j in range(1, len(df_3m) - 1):
             c_time = df_3m.loc[j, 'timestamp']
@@ -147,6 +147,10 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             if len(legs) != 2:
                 log_func(f"⚠️ [{symbol}] Could not resolve option legs. Skipping.")
                 continue
+                
+            # 🚨 NEW: Retrieve the exact historical lot size directly from the API mapping
+            trade_lot_size = legs[0].get('lot_size', fallback_lot_size)
+            if trade_lot_size <= 1: trade_lot_size = fallback_lot_size # Safely fallback if API returned 1 incorrectly
 
             fetch_end = entry_time + timedelta(days=10)
             leg_data = []
@@ -165,13 +169,12 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             leg2_entry = get_premium_at_time(leg_data[1]['df'], entry_time)
             initial_net_credit = (leg1_entry * 1) - (leg2_entry * 1)
             
-            # 🚨 NEW FILTER: Prevent entering low-reward trades with negligible credit
             if initial_net_credit < 15.0:
                 log_func(f"⚠️ [{symbol}] Net credit (₹{initial_net_credit:.2f}) too low. Skipping.")
                 continue
 
             spread_width = abs(legs[0]['strike'] - legs[1]['strike'])
-            capital_employed = spread_width * lot_size
+            capital_employed = spread_width * trade_lot_size
 
             exit_time = df_3m.iloc[-1]['timestamp']
             exit_reason = "Data Ended"
@@ -200,7 +203,6 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
                 current_spread_val = l1_curr - l2_curr
                 current_pnl_per_qty = initial_net_credit - current_spread_val
                 
-                # 🚨 NEW FILTER: Asymmetric Risk/Reward. 50% Profit vs 100% Stop Loss limit.
                 target_hit = current_pnl_per_qty >= (0.50 * initial_net_credit)
                 sl_hit = current_pnl_per_qty <= (-1.00 * initial_net_credit)
 
@@ -218,7 +220,9 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             l1_final = get_premium_at_time(leg_data[0]['df'], exit_time)
             l2_final = get_premium_at_time(leg_data[1]['df'], exit_time)
             final_spread_val = l1_final - l2_final
-            exit_pnl_abs = (initial_net_credit - final_spread_val) * lot_size
+            
+            # PnL is now calculated using the historical lot size instead of a static 1
+            exit_pnl_abs = (initial_net_credit - final_spread_val) * trade_lot_size
             
             bars_in_trade = exit_bar_step - start_3m_idx
             pnl_pct = (exit_pnl_abs / capital_employed * 100) if capital_employed > 0 else 0.0
@@ -232,7 +236,7 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
                 'Duration': trade_duration,
                 'Bars in Trade': bars_in_trade,
                 'Strike Pair': f"{legs[0]['strike']} / {legs[1]['strike']}",
-                'Lot Size': lot_size,
+                'Lot Size': trade_lot_size,
                 'Net Credit (₹)': round(initial_net_credit, 2),
                 'Capital Employed (₹)': round(capital_employed, 2),
                 'Exit Reason': exit_reason,
