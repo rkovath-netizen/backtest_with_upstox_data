@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from common.market_data import fetch_continuous_futures_candles, fetch_upstox_intraday_candles
 from common.options_builder import build_spread_legs
 from common.notifications import send_trade_email
+from common.market_schedule import is_market_open
 
 LOG_FILE = "live_trade_log.csv"
 
@@ -31,13 +32,18 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
                         require_color, require_volume, require_obv_sma, require_1h_sma,
                         email_sender, email_password, log_func):
     
+    # 🚨 MARKET HOURS GUARD: Check schedule before pinging any APIs
+    market_open, reason = is_market_open()
+    if not market_open:
+        log_func(f"💤 Market is closed ({reason}). Scanner is sleeping...")
+        return
+    
     log_df = load_live_log()
     receiver_email = "ramkov199@gmail.com"
     
     for symbol in symbols:
         log_func(f"🔄 Polling {symbol} Live Market Data...")
         
-        # 1. Fetch live futures data up to this exact minute
         end_dt = datetime.now()
         start_dt = end_dt - timedelta(days=15)
         df_1m = fetch_continuous_futures_candles(symbol, start_dt, end_dt, upstox_token, log_func=lambda x: None)
@@ -45,7 +51,6 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
         
         curr_futures_price = df_1m.iloc[-1]['close']
         
-        # 2. Build live indicators
         df_1h = df_1m.set_index('timestamp').resample('1h').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last', 'volume':'sum'}).dropna()
         df_1h['SMA_20'] = ta.sma(df_1h['close'], length=20)
         
@@ -70,7 +75,7 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
         latest_1h = df_1h.iloc[-1]
 
         # ==========================================
-        # 3. CHECK EXITS FOR CURRENTLY OPEN TRADES
+        # CHECK EXITS FOR CURRENTLY OPEN TRADES
         # ==========================================
         open_trades = log_df[(log_df['Status'] == 'OPEN') & (log_df['Symbol'] == symbol)]
         for idx, trade in open_trades.iterrows():
@@ -111,13 +116,12 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
                 send_trade_email(f"Trade Closed: {symbol}", msg, email_sender, email_password, receiver_email)
 
         # ==========================================
-        # 4. CHECK ENTRIES ON LAST CLOSED 3M CANDLE
+        # CHECK ENTRIES ON LAST CLOSED 3M CANDLE
         # ==========================================
-        closed_3m = df_3m.iloc[-2] # Evaluates only fully printed candles
+        closed_3m = df_3m.iloc[-2]
         c_time = closed_3m['timestamp']
         trade_id_base = f"{symbol}_{c_time.strftime('%Y%m%d_%H%M')}"
         
-        # Skip if we already alerted on this specific candle
         if any(log_df['Trade_ID'].str.startswith(trade_id_base)): continue
             
         c_open, c_low, c_high, c_close = closed_3m['open'], closed_3m['low'], closed_3m['high'], closed_3m['close']
@@ -151,7 +155,6 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
         if trade_type:
             strat_name = "Bull Put Spread" if trade_type == 'PE_SPREAD' else "Bear Call Spread"
             
-            # 🚀 Clean architectural call to options_builder
             legs = build_spread_legs(symbol, c_time, c_close, strat_name, upstox_token, sell_offset=sell_offset, buy_offset=buy_offset)
             
             if len(legs) == 2:
