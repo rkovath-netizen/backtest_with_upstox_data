@@ -182,7 +182,6 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, sel
             else:
                 chain_df = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & (df_inst['tradingsymbol'].str.startswith(spot_sym)) & (pd.to_datetime(df_inst['expiry']).dt.date == closest_expiry)].copy()
             
-            # Weekend Limbo Fallback
             if chain_df.empty:
                 chain_df = fetch_expired_chain()
                 if not chain_df.empty:
@@ -228,3 +227,40 @@ def get_option_legs(symbol, entry_time, entry_price, strategy, access_token, sel
         legs.append({'type': f'OTM{buy_offset} CE (Buy)', 'strike': strike_buy, 'key': get_key(strike_buy, 'CE'), 'side': 1, 'is_expired': is_expired})
         
     return [l for l in legs if l['key'] is not None]
+
+def fetch_continuous_futures_candles(symbol, start_dt, end_dt, access_token, interval="1minute", log_func=print):
+    """Automatically finds the active front-month future and fetches its historical data."""
+    df_inst = get_instrument_df()
+    spot_sym = symbol.upper()
+    if spot_sym == 'NIFTY': spot_sym = 'NIFTY 50'
+    elif spot_sym == 'BANKNIFTY': spot_sym = 'NIFTY BANK'
+    elif spot_sym == 'FINNIFTY': spot_sym = 'NIFTY FIN SERVICE'
+    elif spot_sym == 'SENSEX': spot_sym = 'BSX'
+    elif spot_sym == 'BANKEX': spot_sym = 'BKX'
+
+    valid_fo_exchanges = ['NSE_FO', 'BSE_FO']
+    
+    if 'underlying_symbol' in df_inst.columns:
+        futures_active = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & 
+                                 (df_inst['underlying_symbol'] == spot_sym) & 
+                                 ((df_inst['instrument_type'] == 'FUTIDX') | (df_inst['instrument_type'] == 'FUTSTK'))]
+    else:
+        futures_active = df_inst[(df_inst['exchange'].isin(valid_fo_exchanges)) & 
+                                 (df_inst['name'] == spot_sym) &
+                                 (df_inst['tradingsymbol'].str.contains('FUT'))]
+                                 
+    if futures_active.empty:
+        log_func(f"⚠️ No active futures found for {symbol}. Falling back to Spot.")
+        return fetch_upstox_intraday_candles(symbol, start_dt, end_dt, access_token, interval, False, False, log_func)
+        
+    current_date = pd.Timestamp.now(tz="Asia/Kolkata").tz_localize(None)
+    future_contracts = futures_active[pd.to_datetime(futures_active['expiry']).dt.tz_localize(None) >= current_date]
+    
+    if future_contracts.empty:
+        future_contracts = futures_active
+        
+    future_contracts = future_contracts.sort_values(by='expiry')
+    front_month_key = future_contracts.iloc[0]['instrument_key']
+    log_func(f"🔍 Using Active Front-Month Future for {symbol}: {future_contracts.iloc[0]['tradingsymbol']}")
+    
+    return fetch_upstox_intraday_candles(front_month_key, start_dt, end_dt, access_token, interval, is_key=True, is_expired=False, log_func=log_func)
