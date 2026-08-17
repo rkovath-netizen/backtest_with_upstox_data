@@ -1,13 +1,15 @@
 import pandas as pd
 import pandas_ta as ta
 from datetime import timedelta, datetime
-from common.market_data import fetch_upstox_intraday_candles, get_nfo_lot_size, get_option_legs
+from common.market_data import fetch_continuous_futures_candles, get_nfo_lot_size, get_option_legs, fetch_upstox_intraday_candles
 
 def get_premium_at_time(df, target_time):
     past = df[df['timestamp'] <= target_time]
     return past.iloc[-1]['close'] if not past.empty else 0.0
 
-def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_offset=2, buy_offset=4, require_color=False, require_volume=False, progress_callback=None, log_func=print):
+def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_offset=2, buy_offset=4, 
+                              require_color=False, require_volume=False, require_obv_sma=True, require_1h_sma=True, 
+                              progress_callback=None, log_func=print):
     all_trades = []
     total_symbols = len(symbols)
     
@@ -18,14 +20,22 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
         end_dt = datetime.combine(end_date, datetime.max.time())
         warmup_start = start_dt - timedelta(days=15)
         
-        spot_1m = fetch_upstox_intraday_candles(symbol, warmup_start, end_dt, upstox_token, is_key=False, log_func=log_func)
+        # 🚨 NEW: Fetching continuous Futures data instead of Spot data
+        spot_1m = fetch_continuous_futures_candles(symbol, warmup_start, end_dt, upstox_token, log_func=log_func)
         if spot_1m.empty:
-            log_func(f"❌ Failed to fetch underlying spot data for {symbol}. Skipping.")
+            log_func(f"❌ Failed to fetch futures data for {symbol}. Skipping.")
             continue
 
-        log_func(f"📊 Building 15m and 3m dataframes for {symbol}...")
+        log_func(f"📊 Building 1H, 15m, and 3m dataframes for {symbol}...")
         
-        # 15-Minute Dataframe (Macro Trend & Trailing SL)
+        # --- 1-Hour Dataframe ---
+        df_1h = spot_1m.set_index('timestamp').resample('1h').agg({
+            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+        }).dropna()
+        df_1h['SMA_20'] = ta.sma(df_1h['close'], length=20)
+        df_1h = df_1h.reset_index()
+
+        # --- 15-Minute Dataframe ---
         df_15m = spot_1m.set_index('timestamp').resample('15min').agg({
             'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
         }).dropna()
@@ -33,20 +43,21 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
         df_15m['EMA_9'] = ta.ema(df_15m['close'], length=9)
         df_15m['EMA_21'] = ta.ema(df_15m['close'], length=21)
         
+        df_15m['OBV'] = ta.obv(df_15m['close'], df_15m['volume'])
+        df_15m['OBV_SMA_20'] = ta.sma(df_15m['OBV'], length=20)
+        
         atr_15m = ta.atr(df_15m['high'], df_15m['low'], df_15m['close'], length=14)
         df_15m['ATR_Trailing_Long'] = df_15m['close'] - (3 * atr_15m)
         df_15m['ATR_Trailing_Short'] = df_15m['close'] + (3 * atr_15m)
         df_15m = df_15m.reset_index()
 
-        # 3-Minute Dataframe (Retracement Entries)
+        # --- 3-Minute Dataframe ---
         df_3m = spot_1m.set_index('timestamp').resample('3min').agg({
             'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
         }).dropna()
         
         df_3m['EMA_9'] = ta.ema(df_3m['close'], length=9)
         typical_price = (df_3m['high'] + df_3m['low'] + df_3m['close']) / 3
-        
-        # Protect VWAP against Zero-Volume Spot Index Data
         vol_cumsum = df_3m['volume'].cumsum()
         df_3m['VWAP'] = (typical_price * df_3m['volume']).cumsum() / vol_cumsum.replace(0, 1)
         df_3m = df_3m.reset_index()
@@ -59,12 +70,20 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             if c_time < start_dt or c_time > end_dt:
                 continue
                 
+            matching_1h = df_1h[df_1h['timestamp'] <= c_time]
+            if matching_1h.empty: continue
+            curr_1h = matching_1h.iloc[-1]
+            c_1h_close = curr_1h['close']
+            c_1h_sma20 = curr_1h['SMA_20']
+
             matching_15m = df_15m[df_15m['timestamp'] <= c_time]
             if matching_15m.empty: continue
             curr_15m = matching_15m.iloc[-1]
             
             ema9_15 = curr_15m['EMA_9']
             ema21_15 = curr_15m['EMA_21']
+            c_obv = curr_15m['OBV']
+            c_obv_sma20 = curr_15m['OBV_SMA_20']
             
             c_open = df_3m.loc[j, 'open']
             c_low = df_3m.loc[j, 'low']
@@ -81,6 +100,8 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             
             bull_color_ok = (c_close > c_open) if require_color else True
             bull_vol_ok = (c_vol > p_vol) if require_volume else True
+            bull_obv_ok = (c_obv > c_obv_sma20) if require_obv_sma else True
+            bull_1h_ok = (c_1h_close > c_1h_sma20) if require_1h_sma else True
             
             # --- Bearish Conditions (CE Spread) ---
             is_bearish_trend = ema9_15 < ema21_15
@@ -88,15 +109,17 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             
             bear_color_ok = (c_close < c_open) if require_color else True
             bear_vol_ok = (c_vol > p_vol) if require_volume else True
+            bear_obv_ok = (c_obv < c_obv_sma20) if require_obv_sma else True
+            bear_1h_ok = (c_1h_close < c_1h_sma20) if require_1h_sma else True
             
-            if is_bullish_trend and bullish_retracement and bull_color_ok and bull_vol_ok:
+            if is_bullish_trend and bullish_retracement and bull_color_ok and bull_vol_ok and bull_obv_ok and bull_1h_ok:
                 entries.append({
                     'time': df_3m.loc[j+1, 'timestamp'],
                     'price': df_3m.loc[j+1, 'open'],
                     'type': 'PE_SPREAD',
                     '3m_idx': j+1
                 })
-            elif is_bearish_trend and bearish_retracement and bear_color_ok and bear_vol_ok:
+            elif is_bearish_trend and bearish_retracement and bear_color_ok and bear_vol_ok and bear_obv_ok and bear_1h_ok:
                 entries.append({
                     'time': df_3m.loc[j+1, 'timestamp'],
                     'price': df_3m.loc[j+1, 'open'],
@@ -117,7 +140,7 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             start_3m_idx = trade['3m_idx']
             
             if progress_callback: progress_callback(sym_idx + 1, total_symbols, f"[{symbol}] Processing Trade {idx+1}/{len(entries)}")
-            log_func(f"⚡ [{symbol}] Executing {trade_type} at {entry_time} (Spot: {entry_price})")
+            log_func(f"⚡ [{symbol}] Executing {trade_type} at {entry_time} (Futures Price: {entry_price})")
 
             strat_name = "Bull Put Spread" if trade_type == 'PE_SPREAD' else "Bear Call Spread"
             legs = get_option_legs(symbol, entry_time, entry_price, strat_name, upstox_token, sell_offset=sell_offset, buy_offset=buy_offset, chain_cache=chain_cache, log_func=log_func)
@@ -159,12 +182,12 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
                 if not matching_15m.empty:
                     m15_row = matching_15m.iloc[-1]
                     if trade_type == 'PE_SPREAD' and curr_spot_close < m15_row['ATR_Trailing_Long']:
-                        exit_reason = "15m Close < ATR Trailing SL"
+                        exit_reason = "15m Futures Close < ATR Trailing SL"
                         exit_time = curr_time
                         exit_bar_step = step
                         break
                     elif trade_type == 'CE_SPREAD' and curr_spot_close > m15_row['ATR_Trailing_Short']:
-                        exit_reason = "15m Close > ATR Trailing SL"
+                        exit_reason = "15m Futures Close > ATR Trailing SL"
                         exit_time = curr_time
                         exit_bar_step = step
                         break
