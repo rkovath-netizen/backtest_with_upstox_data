@@ -1,7 +1,7 @@
 import pandas as pd
 import pandas_ta as ta
 from datetime import timedelta, datetime
-from common.market_data import fetch_continuous_futures_candles, get_nfo_lot_size, get_option_legs, fetch_upstox_intraday_candles
+from common.market_data import fetch_continuous_futures_candles, get_nfo_lot_size, get_target_option_chain, fetch_upstox_intraday_candles
 
 def get_premium_at_time(df, target_time):
     past = df[df['timestamp'] <= target_time]
@@ -27,21 +27,18 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
 
         log_func(f"📊 Building 1H, 15m, and 3m dataframes for {symbol}...")
         
-        # --- 1-Hour Dataframe ---
         df_1h = spot_1m.set_index('timestamp').resample('1h').agg({
             'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
         }).dropna()
         df_1h['SMA_20'] = ta.sma(df_1h['close'], length=20)
         df_1h = df_1h.reset_index()
 
-        # --- 15-Minute Dataframe ---
         df_15m = spot_1m.set_index('timestamp').resample('15min').agg({
             'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
         }).dropna()
         
         df_15m['EMA_9'] = ta.ema(df_15m['close'], length=9)
         df_15m['EMA_21'] = ta.ema(df_15m['close'], length=21)
-        
         df_15m['OBV'] = ta.obv(df_15m['close'], df_15m['volume'])
         df_15m['OBV_SMA_20'] = ta.sma(df_15m['OBV'], length=20)
         
@@ -50,7 +47,6 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
         df_15m['ATR_Trailing_Short'] = df_15m['close'] + (3 * atr_15m)
         df_15m = df_15m.reset_index()
 
-        # --- 3-Minute Dataframe ---
         df_3m = spot_1m.set_index('timestamp').resample('3min').agg({
             'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
         }).dropna()
@@ -66,8 +62,7 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
         
         for j in range(1, len(df_3m) - 1):
             c_time = df_3m.loc[j, 'timestamp']
-            if c_time < start_dt or c_time > end_dt:
-                continue
+            if c_time < start_dt or c_time > end_dt: continue
                 
             matching_1h = df_1h[df_1h['timestamp'] <= c_time]
             if matching_1h.empty: continue
@@ -93,38 +88,24 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             c_vol = df_3m.loc[j, 'volume']
             p_vol = df_3m.loc[j-1, 'volume']
             
-            # --- Bullish Conditions (PE Spread) ---
             is_bullish_trend = ema9_15 > ema21_15
             bullish_retracement = (c_low < c_ema9 or c_low < c_vwap) and (c_close > c_ema9 or c_close > c_vwap)
-            
             bull_color_ok = (c_close > c_open) if require_color else True
             bull_vol_ok = (c_vol > p_vol) if require_volume else True
             bull_obv_ok = (c_obv > c_obv_sma20) if require_obv_sma else True
             bull_1h_ok = (c_1h_close > c_1h_sma20) if require_1h_sma else True
             
-            # --- Bearish Conditions (CE Spread) ---
             is_bearish_trend = ema9_15 < ema21_15
             bearish_retracement = (c_high > c_ema9 or c_high > c_vwap) and (c_close < c_ema9 or c_close < c_vwap)
-            
             bear_color_ok = (c_close < c_open) if require_color else True
             bear_vol_ok = (c_vol > p_vol) if require_volume else True
             bear_obv_ok = (c_obv < c_obv_sma20) if require_obv_sma else True
             bear_1h_ok = (c_1h_close < c_1h_sma20) if require_1h_sma else True
             
             if is_bullish_trend and bullish_retracement and bull_color_ok and bull_vol_ok and bull_obv_ok and bull_1h_ok:
-                entries.append({
-                    'time': df_3m.loc[j+1, 'timestamp'],
-                    'price': df_3m.loc[j+1, 'open'],
-                    'type': 'PE_SPREAD',
-                    '3m_idx': j+1
-                })
+                entries.append({'time': df_3m.loc[j+1, 'timestamp'], 'price': df_3m.loc[j+1, 'open'], 'type': 'PE_SPREAD', '3m_idx': j+1})
             elif is_bearish_trend and bearish_retracement and bear_color_ok and bear_vol_ok and bear_obv_ok and bear_1h_ok:
-                entries.append({
-                    'time': df_3m.loc[j+1, 'timestamp'],
-                    'price': df_3m.loc[j+1, 'open'],
-                    'type': 'CE_SPREAD',
-                    '3m_idx': j+1
-                })
+                entries.append({'time': df_3m.loc[j+1, 'timestamp'], 'price': df_3m.loc[j+1, 'open'], 'type': 'CE_SPREAD', '3m_idx': j+1})
 
         log_func(f"🎯 Found {len(entries)} valid retracement setups for {symbol}.")
         if not entries: continue
@@ -141,16 +122,52 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             if progress_callback: progress_callback(sym_idx + 1, total_symbols, f"[{symbol}] Processing Trade {idx+1}/{len(entries)}")
             log_func(f"⚡ [{symbol}] Executing {trade_type} at {entry_time} (Futures Price: {entry_price})")
 
-            strat_name = "Bull Put Spread" if trade_type == 'PE_SPREAD' else "Bear Call Spread"
-            legs = get_option_legs(symbol, entry_time, entry_price, strat_name, upstox_token, sell_offset=sell_offset, buy_offset=buy_offset, chain_cache=chain_cache, log_func=log_func)
-                
+            # --- STRATEGY ENGINE OWNS THE LOGIC NOW ---
+            chain_df, is_expired = get_target_option_chain(symbol, entry_time.date(), upstox_token, chain_cache=chain_cache)
+            if chain_df.empty:
+                log_func(f"⚠️ [{symbol}] Option chain unavailable for {entry_time.date()}. Skipping.")
+                continue
+
+            unique_strikes = sorted(chain_df['strike'].unique())
+            if not unique_strikes: continue
+            closest_idx = min(range(len(unique_strikes)), key=lambda i: abs(unique_strikes[i] - entry_price))
+
+            legs = []
+            def extract_leg(target_strike, opt_type):
+                col_type = 'option_type' if 'option_type' in chain_df.columns else 'instrument_type'
+                match = chain_df[(abs(chain_df['strike'] - target_strike) < 0.05) & 
+                                 ((chain_df[col_type] == opt_type) | (chain_df['tradingsymbol'].astype(str).str.endswith(opt_type)))]
+                if not match.empty:
+                    row = match.iloc[0]
+                    ls = int(row['lot_size']) if 'lot_size' in row and pd.notna(row['lot_size']) else fallback_lot_size
+                    return row['instrument_key'], ls
+                return None, None
+
+            try:
+                if trade_type == 'PE_SPREAD':
+                    strike_sell = unique_strikes[max(0, closest_idx - sell_offset)]
+                    strike_buy = unique_strikes[max(0, closest_idx - buy_offset)]
+                    k_sell, ls_sell = extract_leg(strike_sell, 'PE')
+                    k_buy, ls_buy = extract_leg(strike_buy, 'PE')
+                else:
+                    strike_sell = unique_strikes[min(len(unique_strikes)-1, closest_idx + sell_offset)]
+                    strike_buy = unique_strikes[min(len(unique_strikes)-1, closest_idx + buy_offset)]
+                    k_sell, ls_sell = extract_leg(strike_sell, 'CE')
+                    k_buy, ls_buy = extract_leg(strike_buy, 'CE')
+
+                if k_sell and k_buy:
+                    legs = [
+                        {'strike': strike_sell, 'key': k_sell, 'lot_size': ls_sell, 'side': -1, 'is_expired': is_expired},
+                        {'strike': strike_buy, 'key': k_buy, 'lot_size': ls_buy, 'side': 1, 'is_expired': is_expired}
+                    ]
+            except Exception: pass
+
             if len(legs) != 2:
-                log_func(f"⚠️ [{symbol}] Could not resolve option legs. Skipping.")
+                log_func(f"⚠️ [{symbol}] Could not resolve exact strikes. Skipping.")
                 continue
                 
-            # 🚨 NEW: Retrieve the exact historical lot size directly from the API mapping
             trade_lot_size = legs[0].get('lot_size', fallback_lot_size)
-            if trade_lot_size <= 1: trade_lot_size = fallback_lot_size # Safely fallback if API returned 1 incorrectly
+            if trade_lot_size <= 1: trade_lot_size = fallback_lot_size
 
             fetch_end = entry_time + timedelta(days=10)
             leg_data = []
@@ -221,19 +238,16 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             l2_final = get_premium_at_time(leg_data[1]['df'], exit_time)
             final_spread_val = l1_final - l2_final
             
-            # PnL is now calculated using the historical lot size instead of a static 1
             exit_pnl_abs = (initial_net_credit - final_spread_val) * trade_lot_size
-            
             bars_in_trade = exit_bar_step - start_3m_idx
             pnl_pct = (exit_pnl_abs / capital_employed * 100) if capital_employed > 0 else 0.0
-            trade_duration = str(exit_time - entry_time)
 
             all_trades.append({
                 'Symbol': symbol,
                 'Type': trade_type,
                 'Entry Time': entry_time.strftime("%Y-%m-%d %H:%M:%S"),
                 'Exit Time': exit_time.strftime("%Y-%m-%d %H:%M:%S"),
-                'Duration': trade_duration,
+                'Duration': str(exit_time - entry_time),
                 'Bars in Trade': bars_in_trade,
                 'Strike Pair': f"{legs[0]['strike']} / {legs[1]['strike']}",
                 'Lot Size': trade_lot_size,
