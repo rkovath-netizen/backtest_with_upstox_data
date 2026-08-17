@@ -2,6 +2,7 @@ import os
 import json
 import pandas as pd
 import pandas_ta as ta
+import pytz
 from datetime import datetime, timedelta
 from common.market_data import fetch_continuous_futures_candles, fetch_upstox_intraday_candles
 from common.options_builder import build_spread_legs
@@ -23,7 +24,8 @@ def save_live_log(df):
     df.to_csv(LOG_FILE, index=False)
 
 def get_latest_close(symbol_or_key, is_key, access_token):
-    dt_to = datetime.now()
+    # 🚨 Force IST Time for API requests
+    dt_to = pd.Timestamp.now(tz="Asia/Kolkata").tz_localize(None)
     dt_from = dt_to - timedelta(days=3) # Ensure we cover weekends
     df = fetch_upstox_intraday_candles(symbol_or_key, dt_from, dt_to, access_token, interval="1minute", is_key=is_key)
     return df.iloc[-1]['close'] if not df.empty else 0.0
@@ -32,7 +34,6 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
                         require_color, require_volume, require_obv_sma, require_1h_sma,
                         email_sender, email_password, log_func):
     
-    # 🚨 MARKET HOURS GUARD: Check schedule before pinging any APIs
     market_open, reason = is_market_open()
     if not market_open:
         log_func(f"💤 Market is closed ({reason}). Scanner is sleeping...")
@@ -44,8 +45,10 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
     for symbol in symbols:
         log_func(f"🔄 Polling {symbol} Live Market Data...")
         
-        end_dt = datetime.now()
+        # 🚨 Force IST Time for API requests
+        end_dt = pd.Timestamp.now(tz="Asia/Kolkata").tz_localize(None)
         start_dt = end_dt - timedelta(days=15)
+        
         df_1m = fetch_continuous_futures_candles(symbol, start_dt, end_dt, upstox_token, log_func=lambda x: None)
         if df_1m.empty: continue
         
@@ -105,7 +108,8 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
                 pnl_pct = (exit_pnl / cap_emp * 100) if cap_emp > 0 else 0
                 
                 log_df.at[idx, 'Status'] = 'CLOSED'
-                log_df.at[idx, 'Exit Time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                # 🚨 Force IST Time for exit logs
+                log_df.at[idx, 'Exit Time'] = pd.Timestamp.now(tz="Asia/Kolkata").tz_localize(None).strftime("%Y-%m-%d %H:%M:%S")
                 log_df.at[idx, 'Exit Reason'] = exit_reason
                 log_df.at[idx, 'PnL (₹)'] = round(exit_pnl, 2)
                 log_df.at[idx, 'PnL (%)'] = round(pnl_pct, 2)
