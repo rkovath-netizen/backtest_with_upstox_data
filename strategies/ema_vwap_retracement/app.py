@@ -1,150 +1,108 @@
 import streamlit as st
 import pandas as pd
+import time
 from datetime import datetime, timedelta
 from common.github_uploader import push_csv_to_github
 from .strategy_engine import process_ema_vwap_strategy
+from .live_engine import run_live_scan_cycle, load_live_log
 
 def run_ema_vwap_app():
-    st.title("🌊 EMA & VWAP Retracement Quant Scanner")
-    st.markdown("**(Dual Timeframe: 1h/15m Trend + 3m Retracement + Futures Data + Detailed Analytics)**")
-
+    st.title("🌊 EMA & VWAP Quant Engine")
+    
+    app_mode = st.sidebar.radio("Operating Mode", ["Historical Backtest", "Live Forward Tester"])
+    
     st.sidebar.header("⚙️ Strategy Configuration")
-    strategy_name = st.sidebar.text_input("Report Name", value="ema_vwap_retracement_scan")
+    selected_symbols = st.sidebar.multiselect("Indices to Scan:", ["NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY", "BANKEX"], default=["NIFTY", "SENSEX"])
     
-    st.sidebar.markdown("### 🔍 Scanner Inputs")
-    selected_symbols = st.sidebar.multiselect(
-        "Indices to Scan Automatically:",
-        ["NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY", "BANKEX"],
-        default=["NIFTY", "SENSEX"]
-    )
-    
-    st.sidebar.markdown("### 🧪 Testing Filters (Entry Conditions)")
-    require_color = st.sidebar.checkbox("Require Trend Candle Color", value=True, help="Bullish: Close > Open (Green). Bearish: Close < Open (Red).")
-    require_volume = st.sidebar.checkbox("Require Volume Surge", value=True, help="Current 3m Volume > Previous 3m Volume")
-    require_obv_sma = st.sidebar.checkbox("Require 15m OBV > 15m OBV SMA 20", value=True)
-    require_1h_sma = st.sidebar.checkbox("Require 1h Close > 1h SMA 20", value=True)
+    st.sidebar.markdown("### 🧪 Entry Conditions")
+    require_color = st.sidebar.checkbox("Require Trend Candle Color", value=True)
+    require_volume = st.sidebar.checkbox("Require Volume Surge", value=True)
+    require_obv_sma = st.sidebar.checkbox("Require 15m OBV > SMA 20", value=True)
+    require_1h_sma = st.sidebar.checkbox("Require 1h Close > SMA 20", value=True)
 
-    st.sidebar.markdown("### 🎯 Option Strike Configuration")
-    sell_offset_map = {
-        "ATM (0 Strikes OTM)": 0,
-        "OTM 1 (1 Strike OTM)": 1,
-        "OTM 2 (2 Strikes OTM)": 2,
-        "OTM 3 (3 Strikes OTM)": 3,
-        "OTM 4 (4 Strikes OTM)": 4
-    }
-    buy_offset_map = {
-        "OTM 1 (1 Strike OTM)": 1,
-        "OTM 2 (2 Strikes OTM)": 2,
-        "OTM 3 (3 Strikes OTM)": 3,
-        "OTM 4 (4 Strikes OTM)": 4,
-        "OTM 5 (5 Strikes OTM)": 5,
-        "OTM 6 (6 Strikes OTM)": 6
-    }
-    
-    selected_sell_label = st.sidebar.selectbox("Sell Leg Offset", list(sell_offset_map.keys()), index=2)
-    selected_buy_label = st.sidebar.selectbox("Buy Hedge Leg Offset", list(buy_offset_map.keys()), index=3)
-    
-    sell_offset = sell_offset_map[selected_sell_label]
-    buy_offset = buy_offset_map[selected_buy_label]
-    
-    start_date = st.sidebar.date_input("Start Date", datetime.today() - timedelta(days=30))
-    end_date = st.sidebar.date_input("End Date", datetime.today())
+    st.sidebar.markdown("### 🎯 Strike Configuration")
+    sell_offset = st.sidebar.number_input("Sell Leg OTM Offset", min_value=0, max_value=5, value=2)
+    buy_offset = st.sidebar.number_input("Buy Hedge OTM Offset", min_value=1, max_value=10, value=4)
     
     upstox_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", None)
-    github_pat = st.secrets.get("GITHUB_PAT", None)
-    github_repo = st.secrets.get("GITHUB_REPO", None)
-    github_branch = st.secrets.get("GITHUB_BRANCH", "main")
+    email_sender = st.secrets.get("EMAIL_SENDER", None)
+    email_password = st.secrets.get("EMAIL_PASSWORD", None)
 
-    log_expander = st.expander("🛠️ Real-Time Execution Logs", expanded=True)
-    log_box = log_expander.empty()
-    
-    if "ema_vwap_logs" not in st.session_state:
-        st.session_state["ema_vwap_logs"] = []
+    if app_mode == "Historical Backtest":
+        st.markdown("**(Dual Timeframe: 1h/15m Trend + 3m Retracement + Futures Data + Detailed Analytics)**")
+        start_date = st.sidebar.date_input("Start Date", datetime.today() - timedelta(days=30))
+        end_date = st.sidebar.date_input("End Date", datetime.today())
+        
+        log_expander = st.expander("🛠️ Execution Logs", expanded=True)
+        log_box = log_expander.empty()
+        if "ema_vwap_logs" not in st.session_state: st.session_state["ema_vwap_logs"] = []
 
-    def ui_log(msg):
-        st.session_state["ema_vwap_logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-        log_box.code("\n".join(st.session_state["ema_vwap_logs"][-30:]), language="text")
-    
-    if st.button("🚀 Run EMA/VWAP Backtest"):
-        st.session_state["ema_vwap_logs"] = []
-        if not upstox_token:
-            st.error("❌ UPSTOX_ACCESS_TOKEN missing from Secrets.")
-            return
-        if not selected_symbols:
-            st.error("⚠️ Please select at least one index to scan.")
-            return
-        if buy_offset <= sell_offset:
-            st.error("❌ Buy Hedge must be further OTM than Sell Leg.")
-            return
+        def ui_log(msg):
+            st.session_state["ema_vwap_logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            log_box.code("\n".join(st.session_state["ema_vwap_logs"][-30:]), language="text")
+        
+        if st.button("🚀 Run Backtest"):
+            st.session_state["ema_vwap_logs"] = []
+            if not upstox_token: st.error("❌ UPSTOX_ACCESS_TOKEN missing.") ; return
+            if buy_offset <= sell_offset: st.error("❌ Buy Hedge must be further OTM than Sell Leg.") ; return
 
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            def update_progress(current, total, message):
+                progress_bar.progress(int((current / total) * 100))
+                status_text.text(f"[{current}/{total}] {message}")
 
-        def update_progress(current, total, message):
-            progress_bar.progress(int((current / total) * 100))
-            status_text.text(f"[{current}/{total}] {message}")
+            trades_df = process_ema_vwap_strategy(
+                selected_symbols, start_date, end_date, upstox_token, sell_offset, buy_offset,
+                require_color, require_volume, require_obv_sma, require_1h_sma, update_progress, ui_log
+            )
+            st.session_state["ema_vwap_trades_df"] = trades_df
 
-        trades_df = process_ema_vwap_strategy(
-            symbols=selected_symbols,
-            start_date=start_date,
-            end_date=end_date,
-            upstox_token=upstox_token,
-            sell_offset=sell_offset,
-            buy_offset=buy_offset,
-            require_color=require_color,
-            require_volume=require_volume,
-            require_obv_sma=require_obv_sma,
-            require_1h_sma=require_1h_sma,
-            progress_callback=update_progress,
-            log_func=ui_log
-        )
-
-        st.session_state["ema_vwap_trades_df"] = trades_df
-
-    if "ema_vwap_trades_df" in st.session_state:
-        trades_df = st.session_state["ema_vwap_trades_df"]
-        if trades_df.empty:
-            st.warning("⚠️ No trades found matching the criteria in this date range.")
+        if "ema_vwap_trades_df" in st.session_state:
+            trades_df = st.session_state["ema_vwap_trades_df"]
+            if not trades_df.empty:
+                st.success("✅ Backtest Analysis Complete!")
+                st.dataframe(trades_df, width='stretch')
+                
+    else:
+        st.markdown("### 🔴 Live Forward Tester (Paper Trading)")
+        st.info("When started, the scanner checks the market every 60 seconds, manages active trades, and sends email alerts.")
+        
+        col1, col2 = st.columns(2)
+        if col1.button("▶️ Start Live Scanner", type="primary"):
+            if not email_sender or not email_password:
+                st.warning("⚠️ Email secrets not configured. Alerts will log to screen but not send to your inbox.")
+            st.session_state['live_running'] = True
+            
+        if col2.button("⏹️ Stop Scanner"):
+            st.session_state['live_running'] = False
+            
+        # Display Live Log File
+        st.markdown("#### 📂 Live Trade Database")
+        live_df = load_live_log()
+        if not live_df.empty:
+            display_df = live_df.drop(columns=['Legs_JSON'])
+            st.dataframe(display_df, width='stretch')
+            st.download_button("📥 Download Live Logs", live_df.to_csv(index=False), "live_trade_log.csv", "text/csv")
         else:
-            st.success("✅ Backtest Analysis Complete!")
+            st.write("No live trades logged yet.")
             
-            total_pnl = trades_df['PnL (₹)'].sum()
-            win_count = len(trades_df[trades_df['PnL (₹)'] > 0])
-            total_trades = len(trades_df)
-            win_rate = (win_count / total_trades) * 100
-            avg_bars = trades_df['Bars in Trade'].mean()
-            avg_capital = trades_df['Capital Employed (₹)'].mean()
-            avg_pnl_pct = trades_df['PnL (%)'].mean()
-            avg_pnl_trade = trades_df['PnL (₹)'].mean()
-            
-            st.markdown("### 📊 Strategy Performance Summary")
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Total Trades", total_trades)
-            col1.metric("🎯 Win Rate", f"{round(win_rate, 2)}%")
-            
-            col2.metric("💰 Total Net PnL", f"₹ {round(total_pnl, 2):,}")
-            col2.metric("💵 Avg PnL / Trade", f"₹ {round(avg_pnl_trade, 2)}")
-            
-            col3.metric("⏳ Avg Bars in Trade", f"{round(avg_bars, 1)} bars")
-            col3.metric("📈 Avg Return (PnL %)", f"{round(avg_pnl_pct, 2)}%")
-            
-            col4.metric("🏦 Avg Capital Employed", f"₹ {round(avg_capital, 2):,}")
-            pe_trades = len(trades_df[trades_df['Type'] == 'PE_SPREAD'])
-            ce_trades = len(trades_df[trades_df['Type'] == 'CE_SPREAD'])
-            col4.metric("Spread Split", f"PE: {pe_trades} | CE: {ce_trades}")
+        log_box = st.empty()
+        if "live_scan_logs" not in st.session_state: st.session_state["live_scan_logs"] = []
 
-            st.markdown("### 📝 Detailed Trade Log")
-            st.dataframe(trades_df, width='stretch')
+        def live_ui_log(msg):
+            st.session_state["live_scan_logs"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            log_box.code("\n".join(st.session_state["live_scan_logs"][-20:]), language="text")
 
-            csv_buffer = trades_df.to_csv(index=False)
-            export_filename = f"{strategy_name.lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-
-            if github_pat and github_repo:
-                with st.spinner("Pushing combined report to GitHub `data_outputs/`..."):
-                    success, path_or_err = push_csv_to_github(csv_buffer, strategy_name, github_pat, github_repo, github_branch)
-                    if success: 
-                        st.success(f"✅ Archiving complete: `{path_or_err}`")
-                    else: 
-                        st.error(f"❌ GitHub push failed! Error Message: {path_or_err}")
-            else:
-                st.download_button("📥 Download Result CSV", csv_buffer, export_filename, "text/csv")
+        # The Continuous Loop
+        if st.session_state.get('live_running', False):
+            with st.spinner(f"Scanner active. Next market check at {(datetime.now() + timedelta(seconds=60)).strftime('%H:%M:%S')}..."):
+                run_live_scan_cycle(
+                    symbols=selected_symbols, upstox_token=upstox_token, 
+                    sell_offset=sell_offset, buy_offset=buy_offset,
+                    require_color=require_color, require_volume=require_volume, 
+                    require_obv_sma=require_obv_sma, require_1h_sma=require_1h_sma,
+                    email_sender=email_sender, email_password=email_password, log_func=live_ui_log
+                )
+                time.sleep(60) # Wait 1 minute
+                st.rerun() # Refresh the app to loop again and update the CSV viewer!
