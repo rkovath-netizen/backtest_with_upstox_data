@@ -1,13 +1,12 @@
 import pandas as pd
 from common.market_data import get_target_option_chain, get_nfo_lot_size
 
-def build_spread_legs(symbol, entry_time, entry_price, strategy_type, access_token, sell_offset=2, buy_offset=4, chain_cache=None):
+def build_spread_legs(symbol, entry_time, entry_price, strategy_type, access_token, sell_offset=2, buy_offset=4, chain_cache=None, log_func=print):
     """
     Independent module to build strategy-specific option legs.
     Takes raw data from market_data and applies quantitative strike selection logic.
     """
-    # 1. Fetch raw data from the data connector
-    chain_df, is_expired = get_target_option_chain(symbol, pd.to_datetime(entry_time).date(), access_token, chain_cache)
+    chain_df, is_expired = get_target_option_chain(symbol, pd.to_datetime(entry_time).date(), access_token, chain_cache, log_func=log_func)
     
     if chain_df.empty:
         return []
@@ -25,7 +24,6 @@ def build_spread_legs(symbol, entry_time, entry_price, strategy_type, access_tok
                          ((chain_df[col_type] == opt_type) | (chain_df['tradingsymbol'].astype(str).str.endswith(opt_type)))]
         if not match.empty:
             row = match.iloc[0]
-            # Extract historical lot size, safely falling back to current lot size if API returns bad data
             ls = int(row['lot_size']) if 'lot_size' in row and pd.notna(row['lot_size']) else fallback_lot_size
             if ls <= 1: 
                 ls = fallback_lot_size
@@ -34,7 +32,6 @@ def build_spread_legs(symbol, entry_time, entry_price, strategy_type, access_tok
 
     legs = []
     try:
-        # 2. Apply strategy-specific logic boundary
         if strategy_type == "Bull Put Spread":
             strike_sell = unique_strikes[max(0, closest_idx - sell_offset)]
             strike_buy = unique_strikes[max(0, closest_idx - buy_offset)]
@@ -59,6 +56,6 @@ def build_spread_legs(symbol, entry_time, entry_price, strategy_type, access_tok
                     {'strike': strike_buy, 'key': k_buy, 'lot_size': ls_buy, 'side': 1, 'is_expired': is_expired}
                 ]
     except Exception as e:
-        print(f"Error building legs: {e}")
+        log_func(f"Error building legs: {e}")
 
     return legs
