@@ -27,7 +27,10 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             continue
 
         fut_contract_name = spot_1m.attrs.get('contract_name', f"{symbol} Future")
-        log_func(f"📊 Resampling {fut_contract_name} to 1H, 15m, and 3m...")
+        actual_start = spot_1m['timestamp'].min().strftime('%Y-%m-%d')
+        actual_end = spot_1m['timestamp'].max().strftime('%Y-%m-%d')
+        
+        log_func(f"📊 Resampling {fut_contract_name} (Data retrieved: {actual_start} to {actual_end}) to 1H, 15m, and 3m...")
         
         df_1h = spot_1m.set_index('timestamp').resample('1h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
         df_1h['SMA_20'] = ta.sma(df_1h['close'], length=20)
@@ -45,16 +48,26 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
 
         df_3m = spot_1m.set_index('timestamp').resample('3min').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
         df_3m['EMA_9'] = ta.ema(df_3m['close'], length=9)
+        
+        # 🚨 BUG FIX: Anchored Intraday VWAP (Calculates daily resets properly)
+        df_3m['Date'] = df_3m.index.date
         typical_price = (df_3m['high'] + df_3m['low'] + df_3m['close']) / 3
-        vol_cumsum = df_3m['volume'].cumsum()
-        df_3m['VWAP'] = (typical_price * df_3m['volume']).cumsum() / vol_cumsum.replace(0, 1)
+        df_3m['TPV'] = typical_price * df_3m['volume']
+        df_3m['Cum_Vol'] = df_3m.groupby('Date')['volume'].cumsum()
+        df_3m['Cum_TPV'] = df_3m.groupby('Date')['TPV'].cumsum()
+        df_3m['VWAP'] = df_3m['Cum_TPV'] / df_3m['Cum_Vol'].replace(0, 1)
         df_3m = df_3m.reset_index()
         
         entries = []
         
+        # Diagnostic Counters
+        stats = {'total': 0, 'trend': 0, 'retrace': 0, 'color': 0, 'vol': 0, 'obv': 0, 'h1': 0}
+        
         for j in range(1, len(df_3m) - 1):
             c_time = df_3m.loc[j, 'timestamp']
             if c_time < start_dt or c_time > end_dt: continue
+            
+            stats['total'] += 1
                 
             matching_1h = df_1h[df_1h['timestamp'] <= c_time]
             if matching_1h.empty: continue
@@ -81,25 +94,49 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             p_vol = df_3m.loc[j-1, 'volume']
             
             is_bullish_trend = ema9_15 > ema21_15
-            bullish_retracement = (c_low < c_ema9 or c_low < c_vwap) and (c_close > c_ema9 or c_close > c_vwap)
-            bull_color_ok = (c_close > c_open) if require_color else True
-            bull_vol_ok = (c_vol > p_vol) if require_volume else True
-            bull_obv_ok = (c_obv > c_obv_sma20) if require_obv_sma else True
-            bull_1h_ok = (c_1h_close > c_1h_sma20) if require_1h_sma else True
-            
             is_bearish_trend = ema9_15 < ema21_15
-            bearish_retracement = (c_high > c_ema9 or c_high > c_vwap) and (c_close < c_ema9 or c_close < c_vwap)
-            bear_color_ok = (c_close < c_open) if require_color else True
-            bear_vol_ok = (c_vol > p_vol) if require_volume else True
-            bear_obv_ok = (c_obv < c_obv_sma20) if require_obv_sma else True
-            bear_1h_ok = (c_1h_close < c_1h_sma20) if require_1h_sma else True
             
-            if is_bullish_trend and bullish_retracement and bull_color_ok and bull_vol_ok and bull_obv_ok and bull_1h_ok:
-                entries.append({'time': df_3m.loc[j+1, 'timestamp'], 'price': df_3m.loc[j+1, 'open'], 'type': 'PE_SPREAD', '3m_idx': j+1})
-            elif is_bearish_trend and bearish_retracement and bear_color_ok and bear_vol_ok and bear_obv_ok and bear_1h_ok:
-                entries.append({'time': df_3m.loc[j+1, 'timestamp'], 'price': df_3m.loc[j+1, 'open'], 'type': 'CE_SPREAD', '3m_idx': j+1})
+            if not (is_bullish_trend or is_bearish_trend): continue
+            stats['trend'] += 1
+            
+            bullish_retracement = is_bullish_trend and (c_low < c_ema9 or c_low < c_vwap) and (c_close > c_ema9 or c_close > c_vwap)
+            bearish_retracement = is_bearish_trend and (c_high > c_ema9 or c_high > c_vwap) and (c_close < c_ema9 or c_close < c_vwap)
+            
+            if not (bullish_retracement or bearish_retracement): continue
+            stats['retrace'] += 1
+            
+            color_ok = True
+            if require_color:
+                color_ok = (c_close > c_open) if bullish_retracement else (c_close < c_open)
+            if not color_ok: continue
+            stats['color'] += 1
+            
+            vol_ok = (c_vol > p_vol) if require_volume else True
+            if not vol_ok: continue
+            stats['vol'] += 1
+            
+            obv_ok = True
+            if require_obv_sma:
+                obv_ok = (c_obv > c_obv_sma20) if bullish_retracement else (c_obv < c_obv_sma20)
+            if not obv_ok: continue
+            stats['obv'] += 1
+            
+            h1_ok = True
+            if require_1h_sma:
+                h1_ok = (c_1h_close > c_1h_sma20) if bullish_retracement else (c_1h_close < c_1h_sma20)
+            if not h1_ok: continue
+            stats['h1'] += 1
+            
+            # If it survives all filters, generate trade!
+            trade_type = 'PE_SPREAD' if bullish_retracement else 'CE_SPREAD'
+            entries.append({'time': df_3m.loc[j+1, 'timestamp'], 'price': df_3m.loc[j+1, 'open'], 'type': trade_type, '3m_idx': j+1})
 
-        log_func(f"🎯 Found {len(entries)} valid retracement setups for {symbol}.")
+        # Display Diagnostic Funnel
+        log_func(f"🔎 Diagnostic Funnel for {symbol}:")
+        log_func(f"   Bars Scanned: {stats['total']} | Passed Trend: {stats['trend']} | Passed VWAP Retrace: {stats['retrace']}")
+        log_func(f"   Survived Filters -> Color: {stats['color']} | Vol: {stats['vol']} | OBV: {stats['obv']} | 1H: {stats['h1']}")
+        log_func(f"🎯 Total Valid Executions: {len(entries)}")
+        
         if not entries: continue
 
         api_cache = {}
@@ -113,7 +150,6 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             
             if progress_callback: progress_callback(sym_idx + 1, total_symbols, f"[{symbol}] Processing Trade {idx+1}/{len(entries)}")
             
-            # 📌 PRINT EXACT CONTRACT SYMBOL WITH PRICE
             log_func(f"⚡ [{symbol}] Executing {trade_type} at {entry_time} ({fut_contract_name} Price: {entry_price})")
 
             strat_name = "Bull Put Spread" if trade_type == 'PE_SPREAD' else "Bear Call Spread"
