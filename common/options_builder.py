@@ -1,12 +1,30 @@
 import pandas as pd
-from common.market_data import get_target_option_chain, get_nfo_lot_size
+from common.market_data import get_available_expiries, get_target_option_chain, get_nfo_lot_size
 
-def build_spread_legs(symbol, entry_time, entry_price, strategy_type, access_token, sell_offset=2, buy_offset=4, chain_cache=None, log_func=print):
+def build_spread_legs(symbol, entry_time, entry_price, strategy_type, access_token, 
+                      sell_offset=2, buy_offset=4, roll_on_expiry_day=True, 
+                      chain_cache=None, log_func=print):
     """
-    Independent module to build strategy-specific option legs.
-    Takes raw data from market_data and applies quantitative strike selection logic.
+    Strategy Business Logic Layer:
+    1. Determines which expiry to pick (current vs next week).
+    2. Maps strikes according to strategy rules.
     """
-    chain_df, is_expired = get_target_option_chain(symbol, pd.to_datetime(entry_time).date(), access_token, chain_cache, log_func=log_func)
+    trade_date = pd.to_datetime(entry_time).date()
+    valid_expiries = get_available_expiries(symbol, trade_date, access_token)
+    
+    if not valid_expiries:
+        log_func(f"⚠️ No valid expiries found for {symbol} on/after {trade_date}.")
+        return []
+
+    # Expiry selection logic
+    target_expiry = valid_expiries[0]
+    
+    # Apply strategy rule: if trading on expiry day, roll to next week if requested
+    if roll_on_expiry_day and target_expiry == trade_date and len(valid_expiries) > 1:
+        target_expiry = valid_expiries[1]
+        log_func(f"🛡️ [STRATEGY RULE] Expiry Day detected -> Rolling to Next Week ({target_expiry})")
+
+    chain_df, is_expired = get_target_option_chain(symbol, target_expiry, access_token, chain_cache=chain_cache, log_func=log_func)
     
     if chain_df.empty:
         return []
