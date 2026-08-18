@@ -8,120 +8,132 @@ def get_premium_at_time(df, target_time):
     past = df[df['timestamp'] <= target_time]
     return past.iloc[-1]['close'] if not past.empty else 0.0
 
-def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_offset=2, buy_offset=4, 
-                              require_color=False, require_volume=False, require_obv_sma=True, require_1h_sma=True, 
-                              progress_callback=None, log_func=print):
+def process_rsi_divergence(symbols, start_date, end_date, upstox_token, timeframe="15min", 
+                           sell_offset=2, buy_offset=4, 
+                           use_regular=True, use_hidden=True, require_extreme=False,
+                           progress_callback=None, log_func=print):
     all_trades = []
     total_symbols = len(symbols)
     
+    tf_map = {
+        "3 Minutes": "3min",
+        "5 Minutes": "5min",
+        "15 Minutes": "15min",
+        "30 Minutes": "30min",
+        "1 Hour": "1h"
+    }
+    tf_str = tf_map.get(timeframe, "15min")
+    
     for sym_idx, symbol in enumerate(symbols):
-        log_func(f"\n========================================\n🚀 Processing {symbol} (EMA/VWAP Retracement Strategy)\n========================================")
+        log_func(f"\n========================================\n🚀 Processing {symbol} (RSI Divergence | {timeframe})\n========================================")
         
         start_dt = datetime.combine(start_date, datetime.min.time())
         end_dt = datetime.combine(end_date, datetime.max.time())
-        warmup_start = start_dt - timedelta(days=15)
+        warmup_start = start_dt - timedelta(days=20)
         
-        spot_1m = fetch_continuous_futures_candles(symbol, warmup_start, end_dt, upstox_token, log_func=log_func)
-        if spot_1m.empty:
+        df_1m = fetch_continuous_futures_candles(symbol, warmup_start, end_dt, upstox_token, log_func=log_func)
+        if df_1m.empty:
             log_func(f"❌ Failed to fetch futures data for {symbol}. Skipping.")
             continue
 
-        log_func(f"📊 Building 1H, 15m, and 3m dataframes for {symbol}...")
+        fut_contract_name = df_1m.attrs.get('contract_name', f"{symbol} Future")
+        log_func(f"📊 Resampling {fut_contract_name} to {timeframe} and calculating Divergences...")
         
-        df_1h = spot_1m.set_index('timestamp').resample('1h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
-        df_1h['SMA_20'] = ta.sma(df_1h['close'], length=20)
-        df_1h = df_1h.reset_index()
-
-        df_15m = spot_1m.set_index('timestamp').resample('15min').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
-        df_15m['EMA_9'] = ta.ema(df_15m['close'], length=9)
-        df_15m['EMA_21'] = ta.ema(df_15m['close'], length=21)
-        df_15m['OBV'] = ta.obv(df_15m['close'], df_15m['volume'])
-        df_15m['OBV_SMA_20'] = ta.sma(df_15m['OBV'], length=20)
-        atr_15m = ta.atr(df_15m['high'], df_15m['low'], df_15m['close'], length=14)
-        df_15m['ATR_Trailing_Long'] = df_15m['close'] - (3 * atr_15m)
-        df_15m['ATR_Trailing_Short'] = df_15m['close'] + (3 * atr_15m)
-        df_15m = df_15m.reset_index()
-
-        df_3m = spot_1m.set_index('timestamp').resample('3min').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
-        df_3m['EMA_9'] = ta.ema(df_3m['close'], length=9)
-        typical_price = (df_3m['high'] + df_3m['low'] + df_3m['close']) / 3
-        vol_cumsum = df_3m['volume'].cumsum()
-        df_3m['VWAP'] = (typical_price * df_3m['volume']).cumsum() / vol_cumsum.replace(0, 1)
-        df_3m = df_3m.reset_index()
+        df_tf = df_1m.set_index('timestamp').resample(tf_str).agg({
+            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+        }).dropna().reset_index()
+        
+        df_tf['RSI'] = ta.rsi(df_tf['close'], length=14)
         
         entries = []
+        left_bars = 3
+        right_bars = 2
         
-        for j in range(1, len(df_3m) - 1):
-            c_time = df_3m.loc[j, 'timestamp']
+        last_pl_idx, last_pl_price, last_pl_rsi = -1, 0, 0
+        last_ph_idx, last_ph_price, last_ph_rsi = -1, 0, 0
+        
+        for j in range(left_bars + right_bars, len(df_tf) - 1):
+            c_time = df_tf['timestamp'].iloc[j]
             if c_time < start_dt or c_time > end_dt: continue
                 
-            matching_1h = df_1h[df_1h['timestamp'] <= c_time]
-            if matching_1h.empty: continue
-            curr_1h = matching_1h.iloc[-1]
-            c_1h_close = curr_1h['close']
-            c_1h_sma20 = curr_1h['SMA_20']
+            center_idx = j - right_bars
+            
+            # Pivot Low
+            window_lows = df_tf['low'].iloc[j - left_bars - right_bars : j + 1].values
+            center_low = df_tf['low'].iloc[center_idx]
+            
+            if center_low == min(window_lows):
+                curr_price = df_tf['low'].iloc[center_idx]
+                curr_rsi = df_tf['RSI'].iloc[center_idx]
+                
+                if last_pl_idx != -1 and (center_idx - last_pl_idx) <= 50:
+                    is_reg_bull = (curr_price < last_pl_price) and (curr_rsi > last_pl_rsi)
+                    is_hid_bull = (curr_price > last_pl_price) and (curr_rsi < last_pl_rsi)
+                    
+                    extreme_ok = True
+                    if require_extreme:
+                        extreme_ok = (curr_rsi < 40) or (last_pl_rsi < 40)
+                    
+                    if extreme_ok and ((use_regular and is_reg_bull) or (use_hidden and is_hid_bull)):
+                        sig_type = 'Regular Bull (LL/HL)' if is_reg_bull else 'Hidden Bull (HL/LL)'
+                        entries.append({
+                            'time': df_tf['timestamp'].iloc[j + 1],
+                            'price': df_tf['open'].iloc[j + 1],
+                            'type': 'PE_SPREAD',
+                            'signal': sig_type
+                        })
+                
+                last_pl_idx, last_pl_price, last_pl_rsi = center_idx, curr_price, curr_rsi
 
-            matching_15m = df_15m[df_15m['timestamp'] <= c_time]
-            if matching_15m.empty: continue
-            curr_15m = matching_15m.iloc[-1]
+            # Pivot High
+            window_highs = df_tf['high'].iloc[j - left_bars - right_bars : j + 1].values
+            center_high = df_tf['high'].iloc[center_idx]
             
-            ema9_15 = curr_15m['EMA_9']
-            ema21_15 = curr_15m['EMA_21']
-            c_obv = curr_15m['OBV']
-            c_obv_sma20 = curr_15m['OBV_SMA_20']
-            
-            c_open = df_3m.loc[j, 'open']
-            c_low = df_3m.loc[j, 'low']
-            c_high = df_3m.loc[j, 'high']
-            c_close = df_3m.loc[j, 'close']
-            c_ema9 = df_3m.loc[j, 'EMA_9']
-            c_vwap = df_3m.loc[j, 'VWAP']
-            c_vol = df_3m.loc[j, 'volume']
-            p_vol = df_3m.loc[j-1, 'volume']
-            
-            is_bullish_trend = ema9_15 > ema21_15
-            bullish_retracement = (c_low < c_ema9 or c_low < c_vwap) and (c_close > c_ema9 or c_close > c_vwap)
-            bull_color_ok = (c_close > c_open) if require_color else True
-            bull_vol_ok = (c_vol > p_vol) if require_volume else True
-            bull_obv_ok = (c_obv > c_obv_sma20) if require_obv_sma else True
-            bull_1h_ok = (c_1h_close > c_1h_sma20) if require_1h_sma else True
-            
-            is_bearish_trend = ema9_15 < ema21_15
-            bearish_retracement = (c_high > c_ema9 or c_high > c_vwap) and (c_close < c_ema9 or c_close < c_vwap)
-            bear_color_ok = (c_close < c_open) if require_color else True
-            bear_vol_ok = (c_vol > p_vol) if require_volume else True
-            bear_obv_ok = (c_obv < c_obv_sma20) if require_obv_sma else True
-            bear_1h_ok = (c_1h_close < c_1h_sma20) if require_1h_sma else True
-            
-            if is_bullish_trend and bullish_retracement and bull_color_ok and bull_vol_ok and bull_obv_ok and bull_1h_ok:
-                entries.append({'time': df_3m.loc[j+1, 'timestamp'], 'price': df_3m.loc[j+1, 'open'], 'type': 'PE_SPREAD', '3m_idx': j+1})
-            elif is_bearish_trend and bearish_retracement and bear_color_ok and bear_vol_ok and bear_obv_ok and bear_1h_ok:
-                entries.append({'time': df_3m.loc[j+1, 'timestamp'], 'price': df_3m.loc[j+1, 'open'], 'type': 'CE_SPREAD', '3m_idx': j+1})
+            if center_high == max(window_highs):
+                curr_price = df_tf['high'].iloc[center_idx]
+                curr_rsi = df_tf['RSI'].iloc[center_idx]
+                
+                if last_ph_idx != -1 and (center_idx - last_ph_idx) <= 50:
+                    is_reg_bear = (curr_price > last_ph_price) and (curr_rsi < last_ph_rsi)
+                    is_hid_bear = (curr_price < last_ph_price) and (curr_rsi > last_ph_rsi)
+                    
+                    extreme_ok = True
+                    if require_extreme:
+                        extreme_ok = (curr_rsi > 60) or (last_ph_rsi > 60)
+                    
+                    if extreme_ok and ((use_regular and is_reg_bear) or (use_hidden and is_hid_bear)):
+                        sig_type = 'Regular Bear (HH/LH)' if is_reg_bear else 'Hidden Bear (LH/HH)'
+                        entries.append({
+                            'time': df_tf['timestamp'].iloc[j + 1], 
+                            'price': df_tf['open'].iloc[j + 1],
+                            'type': 'CE_SPREAD',
+                            'signal': sig_type
+                        })
+                
+                last_ph_idx, last_ph_price, last_ph_rsi = center_idx, curr_price, curr_rsi
 
-        log_func(f"🎯 Found {len(entries)} valid retracement setups for {symbol}.")
+        log_func(f"🎯 Found {len(entries)} Divergence setups for {symbol} on {timeframe}.")
         if not entries: continue
 
         api_cache = {}
         chain_cache = {}
-        
+        df_3m = df_1m.set_index('timestamp').resample('3min').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna().reset_index()
+
         for idx, trade in enumerate(entries):
             entry_time = trade['time']
             entry_price = trade['price']
             trade_type = trade['type']
-            start_3m_idx = trade['3m_idx']
+            signal_name = trade['signal']
             
-            if progress_callback: progress_callback(sym_idx + 1, total_symbols, f"[{symbol}] Processing Trade {idx+1}/{len(entries)}")
-            log_func(f"⚡ [{symbol}] Executing {trade_type} at {entry_time} (Futures Price: {entry_price})")
+            if progress_callback: progress_callback(sym_idx + 1, total_symbols, f"[{symbol}] Processing {signal_name} {idx+1}/{len(entries)}")
+            
+            # 📌 PRINT EXACT CONTRACT SYMBOL WITH PRICE
+            log_func(f"⚡ [{symbol}] Executing {signal_name} at {entry_time} ({fut_contract_name} Price: {entry_price})")
 
             strat_name = "Bull Put Spread" if trade_type == 'PE_SPREAD' else "Bear Call Spread"
-            
-            # 🚀 Clean architectural call to options_builder
-            legs = build_spread_legs(symbol, entry_time, entry_price, strat_name, upstox_token, sell_offset=sell_offset, buy_offset=buy_offset, chain_cache=chain_cache)
+            legs = build_spread_legs(symbol, entry_time, entry_price, strat_name, upstox_token, sell_offset=sell_offset, buy_offset=buy_offset, chain_cache=chain_cache, log_func=log_func)
                 
-            if len(legs) != 2:
-                log_func(f"⚠️ [{symbol}] Could not resolve exact option legs. Skipping.")
-                continue
-                
+            if len(legs) != 2: continue
             trade_lot_size = legs[0]['lot_size']
 
             fetch_end = entry_time + timedelta(days=10)
@@ -129,7 +141,7 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             for leg in legs:
                 cache_key = f"{leg['key']}_{entry_time.date()}"
                 if cache_key not in api_cache:
-                    api_cache[cache_key] = fetch_upstox_intraday_candles(leg['key'], entry_time - timedelta(days=1), fetch_end, upstox_token, is_key=True, is_expired=leg['is_expired'], log_func=log_func)
+                    api_cache[cache_key] = fetch_upstox_intraday_candles(leg['key'], entry_time - timedelta(days=1), fetch_end, upstox_token, is_key=True, is_expired=leg['is_expired'], log_func=lambda x: None)
                 df_1m_leg = api_cache[cache_key]
                 if not df_1m_leg.empty:
                     df_3m_leg = df_1m_leg.set_index('timestamp').resample('3min').agg({'close': 'last'}).dropna().reset_index()
@@ -142,51 +154,36 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             initial_net_credit = (leg1_entry * 1) - (leg2_entry * 1)
             
             if initial_net_credit < 15.0:
-                log_func(f"⚠️ [{symbol}] Net credit (₹{initial_net_credit:.2f}) too low. Skipping.")
+                log_func(f"⚠️ [{symbol}] Premium (₹{initial_net_credit:.2f}) too low. Skipped.")
                 continue
 
             spread_width = abs(legs[0]['strike'] - legs[1]['strike'])
             capital_employed = spread_width * trade_lot_size
 
-            exit_time = df_3m.iloc[-1]['timestamp']
+            future_3m_data = df_3m[df_3m['timestamp'] >= entry_time].copy()
+            if future_3m_data.empty: continue
+            
+            exit_time = future_3m_data.iloc[-1]['timestamp']
             exit_reason = "Data Ended"
-            exit_bar_step = len(df_3m) - 1
+            bars_in_trade = len(future_3m_data)
 
-            for step in range(start_3m_idx + 1, len(df_3m)):
-                curr_time = df_3m.loc[step, 'timestamp']
-                curr_spot_close = df_3m.loc[step, 'close']
+            for step in range(1, len(future_3m_data)):
+                curr_time = future_3m_data.iloc[step]['timestamp']
                 
-                matching_15m = df_15m[df_15m['timestamp'] <= curr_time]
-                if not matching_15m.empty:
-                    m15_row = matching_15m.iloc[-1]
-                    if trade_type == 'PE_SPREAD' and curr_spot_close < m15_row['ATR_Trailing_Long']:
-                        exit_reason = "15m Futures Close < ATR Trailing SL"
-                        exit_time = curr_time
-                        exit_bar_step = step
-                        break
-                    elif trade_type == 'CE_SPREAD' and curr_spot_close > m15_row['ATR_Trailing_Short']:
-                        exit_reason = "15m Futures Close > ATR Trailing SL"
-                        exit_time = curr_time
-                        exit_bar_step = step
-                        break
-
                 l1_curr = get_premium_at_time(leg_data[0]['df'], curr_time)
                 l2_curr = get_premium_at_time(leg_data[1]['df'], curr_time)
                 current_spread_val = l1_curr - l2_curr
                 current_pnl_per_qty = initial_net_credit - current_spread_val
                 
-                target_hit = current_pnl_per_qty >= (0.50 * initial_net_credit)
-                sl_hit = current_pnl_per_qty <= (-1.00 * initial_net_credit)
-
-                if target_hit:
+                if current_pnl_per_qty >= (0.50 * initial_net_credit):
                     exit_reason = "Target Hit (50% Premium Decay)"
                     exit_time = curr_time
-                    exit_bar_step = step
+                    bars_in_trade = step
                     break
-                elif sl_hit:
+                elif current_pnl_per_qty <= (-1.00 * initial_net_credit):
                     exit_reason = "SL Hit (100% Premium Appreciation)"
                     exit_time = curr_time
-                    exit_bar_step = step
+                    bars_in_trade = step
                     break
 
             l1_final = get_premium_at_time(leg_data[0]['df'], exit_time)
@@ -194,15 +191,15 @@ def process_ema_vwap_strategy(symbols, start_date, end_date, upstox_token, sell_
             final_spread_val = l1_final - l2_final
             
             exit_pnl_abs = (initial_net_credit - final_spread_val) * trade_lot_size
-            bars_in_trade = exit_bar_step - start_3m_idx
             pnl_pct = (exit_pnl_abs / capital_employed * 100) if capital_employed > 0 else 0.0
 
             all_trades.append({
                 'Symbol': symbol,
+                'Contract': fut_contract_name,
+                'Signal': signal_name,
                 'Type': trade_type,
                 'Entry Time': entry_time.strftime("%Y-%m-%d %H:%M:%S"),
                 'Exit Time': exit_time.strftime("%Y-%m-%d %H:%M:%S"),
-                'Duration': str(exit_time - entry_time),
                 'Bars in Trade': bars_in_trade,
                 'Strike Pair': f"{legs[0]['strike']} / {legs[1]['strike']}",
                 'Lot Size': trade_lot_size,
