@@ -24,9 +24,8 @@ def save_live_log(df):
     df.to_csv(LOG_FILE, index=False)
 
 def get_latest_close(symbol_or_key, is_key, access_token):
-    # 🚨 Force IST Time for API requests
     dt_to = pd.Timestamp.now(tz="Asia/Kolkata").tz_localize(None)
-    dt_from = dt_to - timedelta(days=3) # Ensure we cover weekends
+    dt_from = dt_to - timedelta(days=3)
     df = fetch_upstox_intraday_candles(symbol_or_key, dt_from, dt_to, access_token, interval="1minute", is_key=is_key)
     return df.iloc[-1]['close'] if not df.empty else 0.0
 
@@ -43,21 +42,25 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
     receiver_email = "ramkov199@gmail.com"
     
     for symbol in symbols:
-        log_func(f"🔄 Polling {symbol} Live Market Data...")
-        
-        # 🚨 Force IST Time for API requests
+        # Force IST Time for API requests
         end_dt = pd.Timestamp.now(tz="Asia/Kolkata").tz_localize(None)
         start_dt = end_dt - timedelta(days=15)
         
         df_1m = fetch_continuous_futures_candles(symbol, start_dt, end_dt, upstox_token, log_func=lambda x: None)
-        if df_1m.empty: continue
         
+        # 🚨 DEBUG: Explicit Data Failure Warning
+        if df_1m.empty: 
+            log_func(f"❌ [CRITICAL] {symbol} returned 0 candles! Is your Upstox API Token expired?")
+            continue
+            
         curr_futures_price = df_1m.iloc[-1]['close']
         
-        df_1h = df_1m.set_index('timestamp').resample('1h').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last', 'volume':'sum'}).dropna()
+        # --- 1H Indicators ---
+        df_1h = df_1m.set_index('timestamp').resample('1h').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last', 'volume':'sum'}).dropna().reset_index()
         df_1h['SMA_20'] = ta.sma(df_1h['close'], length=20)
         
-        df_15m = df_1m.set_index('timestamp').resample('15min').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last', 'volume':'sum'}).dropna()
+        # --- 15M Indicators ---
+        df_15m = df_1m.set_index('timestamp').resample('15min').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last', 'volume':'sum'}).dropna().reset_index()
         df_15m['EMA_9'] = ta.ema(df_15m['close'], length=9)
         df_15m['EMA_21'] = ta.ema(df_15m['close'], length=21)
         df_15m['OBV'] = ta.obv(df_15m['close'], df_15m['volume'])
@@ -66,21 +69,26 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
         df_15m['ATR_Trailing_Long'] = df_15m['close'] - (3 * atr_15m)
         df_15m['ATR_Trailing_Short'] = df_15m['close'] + (3 * atr_15m)
         
-        df_3m = df_1m.set_index('timestamp').resample('3min').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last', 'volume':'sum'}).dropna()
+        # --- 3M Indicators ---
+        df_3m = df_1m.set_index('timestamp').resample('3min').agg({'open':'first', 'high':'max', 'low':'min', 'close':'last', 'volume':'sum'}).dropna().reset_index()
         df_3m['EMA_9'] = ta.ema(df_3m['close'], length=9)
+        
+        # 🚨 BUG FIX: Calculate TRUE Intraday Anchored VWAP (Resets daily at 9:15)
+        df_3m['Date'] = df_3m['timestamp'].dt.date
         typical_price = (df_3m['high'] + df_3m['low'] + df_3m['close']) / 3
-        df_3m['VWAP'] = (typical_price * df_3m['volume']).cumsum() / df_3m['volume'].cumsum().replace(0, 1)
+        df_3m['TPV'] = typical_price * df_3m['volume']
+        df_3m['Cum_Vol'] = df_3m.groupby('Date')['volume'].cumsum()
+        df_3m['Cum_TPV'] = df_3m.groupby('Date')['TPV'].cumsum()
+        df_3m['VWAP'] = df_3m['Cum_TPV'] / df_3m['Cum_Vol'].replace(0, 1)
         
-        df_1h, df_15m, df_3m = df_1h.reset_index(), df_15m.reset_index(), df_3m.reset_index()
-        if len(df_1h) < 1 or len(df_15m) < 1 or len(df_3m) < 2: continue
-        
-        latest_15m = df_15m.iloc[-1]
-        latest_1h = df_1h.iloc[-1]
+        if len(df_1h) < 1 or len(df_15m) < 1 or len(df_3m) < 2: 
+            log_func(f"⚠️ [WARN] Not enough data to calculate indicators for {symbol}.")
+            continue
 
         # ==========================================
-        # CHECK EXITS FOR CURRENTLY OPEN TRADES
+        # 1. CHECK EXITS FOR CURRENTLY OPEN TRADES
         # ==========================================
-        open_trades = log_df[(log_df['Status'] == 'OPEN') & (log_df['Symbol'] == symbol)]
+        open_trades = log_df[(log_df['Status'] == 'OPEN') & (log_df['Symbol'] == symbol) & (~log_df['Trade_ID'].str.contains("RSIDIV"))]
         for idx, trade in open_trades.iterrows():
             net_credit = float(trade['Net Credit (₹)'])
             lot_size = int(trade['Lot Size'])
@@ -91,12 +99,16 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
             l1_curr = get_latest_close(legs[0]['key'], True, upstox_token)
             l2_curr = get_latest_close(legs[1]['key'], True, upstox_token)
             
+            if l1_curr == 0.0 or l2_curr == 0.0:
+                log_func(f"⚠️ [WARN] Could not fetch live option premiums for {trade['Trade_ID']}. Will re-check next cycle.")
+                continue
+
             curr_pnl_qty = net_credit - (l1_curr - l2_curr)
             
             exit_reason = None
-            if trade_type == 'PE_SPREAD' and curr_futures_price < latest_15m['ATR_Trailing_Long']:
+            if trade_type == 'PE_SPREAD' and curr_futures_price < df_15m.iloc[-1]['ATR_Trailing_Long']:
                 exit_reason = "15m Futures Close < ATR Trailing SL"
-            elif trade_type == 'CE_SPREAD' and curr_futures_price > latest_15m['ATR_Trailing_Short']:
+            elif trade_type == 'CE_SPREAD' and curr_futures_price > df_15m.iloc[-1]['ATR_Trailing_Short']:
                 exit_reason = "15m Futures Close > ATR Trailing SL"
             elif curr_pnl_qty >= (0.50 * net_credit):
                 exit_reason = "Target Hit (50% Premium Decay)"
@@ -108,7 +120,6 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
                 pnl_pct = (exit_pnl / cap_emp * 100) if cap_emp > 0 else 0
                 
                 log_df.at[idx, 'Status'] = 'CLOSED'
-                # 🚨 Force IST Time for exit logs
                 log_df.at[idx, 'Exit Time'] = pd.Timestamp.now(tz="Asia/Kolkata").tz_localize(None).strftime("%Y-%m-%d %H:%M:%S")
                 log_df.at[idx, 'Exit Reason'] = exit_reason
                 log_df.at[idx, 'PnL (₹)'] = round(exit_pnl, 2)
@@ -120,43 +131,67 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
                 send_trade_email(f"Trade Closed: {symbol}", msg, email_sender, email_password, receiver_email)
 
         # ==========================================
-        # CHECK ENTRIES ON LAST CLOSED 3M CANDLE
+        # 2. CHECK ENTRIES ON LAST CLOSED 3M CANDLE
         # ==========================================
         closed_3m = df_3m.iloc[-2]
         c_time = closed_3m['timestamp']
         trade_id_base = f"{symbol}_{c_time.strftime('%Y%m%d_%H%M')}"
         
-        if any(log_df['Trade_ID'].str.startswith(trade_id_base)): continue
+        if any(log_df['Trade_ID'].str.startswith(trade_id_base)): 
+            continue # Already traded this candle
+            
+        # 🚨 Sync 15m and 1h indicators exactly to the 3m close time
+        match_15m = df_15m[df_15m['timestamp'] <= c_time]
+        latest_15m = match_15m.iloc[-1] if not match_15m.empty else df_15m.iloc[-1]
+        
+        match_1h = df_1h[df_1h['timestamp'] <= c_time]
+        latest_1h = match_1h.iloc[-1] if not match_1h.empty else df_1h.iloc[-1]
             
         c_open, c_low, c_high, c_close = closed_3m['open'], closed_3m['low'], closed_3m['high'], closed_3m['close']
         c_ema9, c_vwap, c_vol = closed_3m['EMA_9'], closed_3m['VWAP'], closed_3m['volume']
         p_vol = df_3m.iloc[-3]['volume'] if len(df_3m) >= 3 else c_vol
         
+        # Boolean Evaluations
         is_bullish = (latest_15m['EMA_9'] > latest_15m['EMA_21'])
         bull_retracement = (c_low < c_ema9 or c_low < c_vwap) and (c_close > c_ema9 or c_close > c_vwap)
         
         is_bearish = (latest_15m['EMA_9'] < latest_15m['EMA_21'])
         bear_retracement = (c_high > c_ema9 or c_high > c_vwap) and (c_close < c_ema9 or c_close < c_vwap)
         
+        bull_color_ok = (c_close > c_open)
+        bear_color_ok = (c_close < c_open)
+        vol_ok = (c_vol > p_vol)
+        obv_bull_ok = (latest_15m['OBV'] > latest_15m['OBV_SMA_20'])
+        obv_bear_ok = (latest_15m['OBV'] < latest_15m['OBV_SMA_20'])
+        h1_bull_ok = (latest_1h['close'] > latest_1h['SMA_20'])
+        h1_bear_ok = (latest_1h['close'] < latest_1h['SMA_20'])
+
+        # 🛠️ DEEP DEBUG LOGGING 🛠️
+        # This prints directly to the UI box so you can see why trades are failing or passing
+        log_func(f"[{symbol}] Eval {c_time.strftime('%H:%M')} Bar | Trend: {'BULL' if is_bullish else 'BEAR' if is_bearish else 'FLAT'} | Retrace: {'Bull' if bull_retracement else 'Bear' if bear_retracement else 'NONE'}")
+        log_func(f"   ↳ VolSurge={'PASS' if vol_ok else 'FAIL'} | Color={'BULL' if bull_color_ok else 'BEAR'} | OBV={'BULL' if obv_bull_ok else 'BEAR'} | 1H={'BULL' if h1_bull_ok else 'BEAR'}")
+
+        # Final Logic Compounding
         bull_conds = [
             is_bullish, bull_retracement,
-            (c_close > c_open) if require_color else True,
-            (c_vol > p_vol) if require_volume else True,
-            (latest_15m['OBV'] > latest_15m['OBV_SMA_20']) if require_obv_sma else True,
-            (latest_1h['close'] > latest_1h['SMA_20']) if require_1h_sma else True
+            bull_color_ok if require_color else True,
+            vol_ok if require_volume else True,
+            obv_bull_ok if require_obv_sma else True,
+            h1_bull_ok if require_1h_sma else True
         ]
         
         bear_conds = [
             is_bearish, bear_retracement,
-            (c_close < c_open) if require_color else True,
-            (c_vol > p_vol) if require_volume else True,
-            (latest_15m['OBV'] < latest_15m['OBV_SMA_20']) if require_obv_sma else True,
-            (latest_1h['close'] < latest_1h['SMA_20']) if require_1h_sma else True
+            bear_color_ok if require_color else True,
+            vol_ok if require_volume else True,
+            obv_bear_ok if require_obv_sma else True,
+            h1_bear_ok if require_1h_sma else True
         ]
         
         trade_type = 'PE_SPREAD' if all(bull_conds) else ('CE_SPREAD' if all(bear_conds) else None)
             
         if trade_type:
+            log_func(f"✅ [SIGNAL TRIGGERED] Initiating {trade_type} Builder...")
             strat_name = "Bull Put Spread" if trade_type == 'PE_SPREAD' else "Bear Call Spread"
             
             legs = build_spread_legs(symbol, c_time, c_close, strat_name, upstox_token, sell_offset=sell_offset, buy_offset=buy_offset)
@@ -164,6 +199,11 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
             if len(legs) == 2:
                 l1_curr = get_latest_close(legs[0]['key'], True, upstox_token)
                 l2_curr = get_latest_close(legs[1]['key'], True, upstox_token)
+                
+                if l1_curr == 0.0 or l2_curr == 0.0:
+                    log_func(f"⚠️ [WARN] Could not fetch entry premiums for {symbol}. Trade skipped.")
+                    continue
+                    
                 net_credit = l1_curr - l2_curr
                 
                 if net_credit >= 15.0:
@@ -193,4 +233,6 @@ def run_live_scan_cycle(symbols, upstox_token, sell_offset, buy_offset,
                     log_func(msg)
                     send_trade_email(f"Trade Opened: {symbol}", msg, email_sender, email_password, receiver_email)
                 else:
-                    log_func(f"⚠️ {symbol} valid setup found, but Premium (₹{net_credit:.2f}) < ₹15. Skipped.")
+                    log_func(f"⚠️ [REJECTED] {symbol} setup valid, but Premium (₹{net_credit:.2f}) < Minimum ₹15.00 limit.")
+            else:
+                log_func(f"⚠️ [REJECTED] Options Builder could not find valid options strikes for {symbol}.")
