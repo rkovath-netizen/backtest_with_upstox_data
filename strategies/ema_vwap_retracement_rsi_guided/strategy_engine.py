@@ -160,7 +160,8 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             # 🧠 TRADE INTELLIGENCE LAYER: Expiry Selection & Roll Rules
             # -------------------------------------------------------------
             trade_date = entry_time.date()
-            valid_expiries = get_available_expiries(symbol, trade_date, upstox_token)
+            # 🚨 Added log_func=log_func to pipe the debug text to the UI
+            valid_expiries = get_available_expiries(symbol, trade_date, upstox_token, log_func=log_func)
             
             if not valid_expiries:
                 log_func(f"⚠️ [{symbol}] No expiries found for {trade_date}. Skipping.")
