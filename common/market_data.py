@@ -78,8 +78,6 @@ def fetch_upstox_intraday_candles(symbol_or_key, start_dt, end_dt, access_token,
     all_candles = []
     chunk_start = start_dt
     headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
-    
-    # 🚨 STRICT API SELECTION: Uses expired historical endpoint for old contracts
     base_url = UPSTOX_EXPIRED_HISTORICAL_URL if is_expired else UPSTOX_HISTORICAL_URL
 
     while chunk_start < end_dt:
@@ -138,11 +136,9 @@ def fetch_continuous_futures_candles(symbol, start_dt, end_dt, access_token, int
         active_expiries = pd.to_datetime(futures_active['expiry'], errors='coerce').dt.date.dropna().unique().tolist()
 
     expired_expiries = []
-    
     if eval_date < current_date and safe_eq_key:
         try:
             time.sleep(0.3)
-            # 🚨 ZERO ASSUMPTIONS: Calling exact Upstox endpoint for real expiries
             exp_url = f"https://api.upstox.com/v2/expired-instruments/expiries?instrument_key={safe_eq_key}"
             res = requests.get(exp_url, headers=headers, timeout=10)
             if res.status_code == 200:
@@ -154,7 +150,9 @@ def fetch_continuous_futures_candles(symbol, start_dt, end_dt, access_token, int
     
     if not future_expiries:
         log_func(f"⚠️ [DATA HYGIENE] No Upstox API expiries found for {symbol} after {eval_date}. Falling back to Spot.")
-        return fetch_upstox_intraday_candles(symbol, start_dt, end_dt, access_token, interval, False, False, log_func)
+        df_spot = fetch_upstox_intraday_candles(symbol, start_dt, end_dt, access_token, interval, False, False, log_func)
+        df_spot.attrs['contract_name'] = f"{symbol} (Spot Fallback)"
+        return df_spot
         
     closest_expiry = future_expiries[0]
     is_expired = closest_expiry < current_date
@@ -165,7 +163,6 @@ def fetch_continuous_futures_candles(symbol, start_dt, end_dt, access_token, int
     if is_expired and safe_eq_key:
         try:
             time.sleep(0.3)
-            # 🚨 ZERO ASSUMPTIONS: Calling exact Upstox endpoint for historical future contract key
             opt_url = f"https://api.upstox.com/v2/expired-instruments/future/contract?instrument_key={safe_eq_key}&expiry_date={closest_expiry.strftime('%Y-%m-%d')}"
             res = requests.get(opt_url, headers=headers, timeout=10)
             if res.status_code == 200:
@@ -184,10 +181,17 @@ def fetch_continuous_futures_candles(symbol, start_dt, end_dt, access_token, int
         is_expired = False
         
     if not front_month_key:
-        return fetch_upstox_intraday_candles(symbol, start_dt, end_dt, access_token, interval, False, False, log_func)
+        df_spot = fetch_upstox_intraday_candles(symbol, start_dt, end_dt, access_token, interval, False, False, log_func)
+        df_spot.attrs['contract_name'] = f"{symbol} (Spot Fallback)"
+        return df_spot
 
-    log_func(f"🛡️ [API CONFIRMED] Upstox returned {symbol} Future {front_month_sym} (API Expiry: {closest_expiry})")
-    return fetch_upstox_intraday_candles(front_month_key, start_dt, end_dt, access_token, interval, is_key=True, is_expired=is_expired, log_func=log_func)
+    log_func(f"🛡️ [API CONFIRMED] Upstox returned {symbol} Future: {front_month_sym} (Expiry: {closest_expiry})")
+    df = fetch_upstox_intraday_candles(front_month_key, start_dt, end_dt, access_token, interval, is_key=True, is_expired=is_expired, log_func=log_func)
+    
+    # 📌 Attach the exact contract symbol to dataframe metadata
+    if not df.empty:
+        df.attrs['contract_name'] = front_month_sym or f"{symbol} FUT"
+    return df
 
 def get_target_option_chain(symbol, target_date, access_token, chain_cache=None, log_func=print):
     df_inst = get_instrument_df()
@@ -222,7 +226,6 @@ def get_target_option_chain(symbol, target_date, access_token, chain_cache=None,
     if safe_eq_key:
         try:
             time.sleep(0.3)
-            # 🚨 ZERO ASSUMPTIONS: API fetch for historical expiries
             exp_url = f"https://api.upstox.com/v2/expired-instruments/expiries?instrument_key={safe_eq_key}"
             res = requests.get(exp_url, headers=headers, timeout=10)
             if res.status_code == 200:
@@ -239,13 +242,12 @@ def get_target_option_chain(symbol, target_date, access_token, chain_cache=None,
     closest_expiry = future_expiries[0]
     is_expired = closest_expiry < current_date
     
-    log_func(f"🛡️ [API CONFIRMED] Target Date: {target_date} -> Upstox Option Expiry Assigned: {closest_expiry}")
+    log_func(f"🛡️ [API CONFIRMED] Target Date: {target_date} -> Upstox Option Expiry: {closest_expiry}")
     
     def fetch_expired_chain():
         if not safe_eq_key: return pd.DataFrame()
         try:
             time.sleep(0.3)
-            # 🚨 ZERO ASSUMPTIONS: Fetching option chain using specific API endpoint
             opt_url = f"https://api.upstox.com/v2/expired-instruments/option/contract?instrument_key={safe_eq_key}&expiry_date={closest_expiry.strftime('%Y-%m-%d')}"
             res = requests.get(opt_url, headers=headers, timeout=10)
             if res.status_code == 200:
