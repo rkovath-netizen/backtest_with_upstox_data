@@ -9,16 +9,21 @@ app_mode = st.sidebar.selectbox(
     "Select Strategy Dashboard:",
     [
         "📊 Options Straddle Scaffold",
-        "🌊 EMA/VWAP Retracement",
+        "🌊 EMA/VWAP Retracement (Original)",
+        "🎯 Spot Price Retracement (EMA 50 / RSI)",  # <--- ADDED
         "📈 Comparative Options Backtester",
         "🐂 15m RSI Bull Put Spread",
         "📉 RSI Divergence Engine"
     ]
 )
 
-if app_mode == "🌊 EMA/VWAP Retracement":
+if app_mode == "🌊 EMA/VWAP Retracement (Original)":
     from strategies.ema_vwap_retracement.app import run_ema_vwap_app
     run_ema_vwap_app()
+
+elif app_mode == "🎯 Spot Price Retracement (EMA 50 / RSI)":
+    from strategies.ema_vwap_retracement_rsi_guided.app import run_ema_rsi_app
+    run_ema_rsi_app()
 
 elif app_mode == "📉 RSI Divergence Engine":
     from strategies.rsi_divergence.app import run_rsi_divergence_app
