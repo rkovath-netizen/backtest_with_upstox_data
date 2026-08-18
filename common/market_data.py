@@ -139,6 +139,7 @@ def fetch_continuous_futures_candles(symbol, start_dt, end_dt, access_token, int
     if eval_date < current_date and safe_eq_key:
         try:
             time.sleep(0.3)
+            # This returns ALL expiries (Weekly Options + Monthly Futures)
             exp_url = f"https://api.upstox.com/v2/expired-instruments/expiries?instrument_key={safe_eq_key}"
             res = requests.get(exp_url, headers=headers, timeout=10)
             if res.status_code == 200:
@@ -154,24 +155,38 @@ def fetch_continuous_futures_candles(symbol, start_dt, end_dt, access_token, int
         df_spot.attrs['contract_name'] = f"{symbol} (Spot Fallback)"
         return df_spot
         
-    closest_expiry = future_expiries[0]
-    is_expired = closest_expiry < current_date
-    
     front_month_key = None
     front_month_sym = None
+    is_expired = False
     
-    if is_expired and safe_eq_key:
-        try:
-            time.sleep(0.3)
-            opt_url = f"https://api.upstox.com/v2/expired-instruments/future/contract?instrument_key={safe_eq_key}&expiry_date={closest_expiry.strftime('%Y-%m-%d')}"
-            res = requests.get(opt_url, headers=headers, timeout=10)
-            if res.status_code == 200:
-                contracts = res.json().get('data', [])
-                if contracts:
-                    front_month_key = contracts[0].get('instrument_key')
-                    front_month_sym = contracts[0].get('trading_symbol')
-        except Exception: pass
+    # 🚨 BUG FIX: Loop through the dates until we find one that actually has a FUTURES contract!
+    # This ignores weekly options expiries automatically.
+    for exp_date in future_expiries:
+        is_expired = exp_date < current_date
         
+        if is_expired and safe_eq_key:
+            try:
+                time.sleep(0.3)
+                opt_url = f"https://api.upstox.com/v2/expired-instruments/future/contract?instrument_key={safe_eq_key}&expiry_date={exp_date.strftime('%Y-%m-%d')}"
+                res = requests.get(opt_url, headers=headers, timeout=10)
+                if res.status_code == 200:
+                    contracts = res.json().get('data', [])
+                    if contracts:
+                        front_month_key = contracts[0].get('instrument_key')
+                        front_month_sym = contracts[0].get('trading_symbol')
+                        break # Found the monthly future! Stop looking.
+            except Exception: pass
+        else:
+            # Check live active contracts
+            if not futures_active.empty:
+                fallback_contracts = futures_active[pd.to_datetime(futures_active['expiry'], errors='coerce').dt.date == exp_date]
+                if not fallback_contracts.empty:
+                    front_month_key = fallback_contracts.iloc[0]['instrument_key']
+                    front_month_sym = fallback_contracts.iloc[0]['tradingsymbol']
+                    is_expired = False
+                    break
+                    
+    # Ultimate fallback if everything fails
     if not front_month_key and not futures_active.empty:
         fallback_contracts = futures_active[pd.to_datetime(futures_active['expiry'], errors='coerce').dt.date >= eval_date]
         if fallback_contracts.empty: fallback_contracts = futures_active
@@ -179,16 +194,15 @@ def fetch_continuous_futures_candles(symbol, start_dt, end_dt, access_token, int
         front_month_key = fallback_contracts.iloc[0]['instrument_key']
         front_month_sym = fallback_contracts.iloc[0]['tradingsymbol']
         is_expired = False
-        
+
     if not front_month_key:
         df_spot = fetch_upstox_intraday_candles(symbol, start_dt, end_dt, access_token, interval, False, False, log_func)
         df_spot.attrs['contract_name'] = f"{symbol} (Spot Fallback)"
         return df_spot
 
-    log_func(f"🛡️ [API CONFIRMED] Upstox returned {symbol} Future: {front_month_sym} (Expiry: {closest_expiry})")
+    log_func(f"🛡️ [API CONFIRMED] Target Date: {eval_date} -> Resolved Future: {front_month_sym}")
     df = fetch_upstox_intraday_candles(front_month_key, start_dt, end_dt, access_token, interval, is_key=True, is_expired=is_expired, log_func=log_func)
     
-    # 📌 Attach the exact contract symbol to dataframe metadata
     if not df.empty:
         df.attrs['contract_name'] = front_month_sym or f"{symbol} FUT"
     return df
@@ -239,10 +253,11 @@ def get_target_option_chain(symbol, target_date, access_token, chain_cache=None,
         log_func(f"⚠️ [DATA HYGIENE] No valid options expiries found for {symbol} after {target_date}.")
         return pd.DataFrame(), False
         
+    # Options strictly use the closest expiry (including weeklies)
     closest_expiry = future_expiries[0]
     is_expired = closest_expiry < current_date
     
-    log_func(f"🛡️ [API CONFIRMED] Target Date: {target_date} -> Upstox Option Expiry: {closest_expiry}")
+    log_func(f"🛡️ [API CONFIRMED] Target Date: {target_date} -> Resolved Option Expiry: {closest_expiry}")
     
     def fetch_expired_chain():
         if not safe_eq_key: return pd.DataFrame()
