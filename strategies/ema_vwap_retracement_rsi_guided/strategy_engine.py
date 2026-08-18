@@ -4,6 +4,7 @@ import datetime as dt
 from datetime import timedelta, datetime
 from common.market_data import fetch_upstox_intraday_candles, get_available_expiries
 from common.options_builder import build_spread_legs
+from common.market_calendar import resolve_expiry
 
 def get_premium_at_time(df, target_time):
     past = df[df['timestamp'] <= target_time]
