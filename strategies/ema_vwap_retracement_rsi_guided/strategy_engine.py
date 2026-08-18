@@ -1,7 +1,8 @@
 import pandas as pd
 import pandas_ta as ta
+import datetime as dt
 from datetime import timedelta, datetime
-from common.market_data import fetch_upstox_intraday_candles
+from common.market_data import fetch_upstox_intraday_candles, get_available_expiries
 from common.options_builder import build_spread_legs
 
 def get_premium_at_time(df, target_time):
@@ -21,10 +22,8 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
         end_dt = datetime.combine(end_date, datetime.max.time())
         warmup_start = start_dt - timedelta(days=15)
         
-        # 🚨 FETCH PURE SPOT DATA (No Futures, No Rollovers, No Expiry Issues)
         spot_1m = fetch_upstox_intraday_candles(symbol, warmup_start, end_dt, upstox_token, interval="1minute", log_func=log_func)
         if spot_1m.empty:
-            log_func(f"❌ Failed to fetch Spot data for {symbol}. Skipping.")
             continue
 
         actual_start = spot_1m['timestamp'].min().strftime('%Y-%m-%d')
@@ -38,7 +37,6 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
         df_15m = spot_1m.set_index('timestamp').resample('15min').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
         df_15m['EMA_9'] = ta.ema(df_15m['close'], length=9)
         df_15m['EMA_21'] = ta.ema(df_15m['close'], length=21)
-        # 🚨 RSI Momentum instead of OBV
         df_15m['RSI_14'] = ta.rsi(df_15m['close'], length=14)
         df_15m['RSI_SMA_14'] = ta.sma(df_15m['RSI_14'], length=14)
         atr_15m = ta.atr(df_15m['high'], df_15m['low'], df_15m['close'], length=14)
@@ -48,10 +46,8 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
 
         df_3m = spot_1m.set_index('timestamp').resample('3min').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
         df_3m['EMA_9'] = ta.ema(df_3m['close'], length=9)
-        # 🚨 3m EMA 50 replaces VWAP as the structural support
         df_3m['EMA_50'] = ta.ema(df_3m['close'], length=50)
         
-        # 🚨 Body Expansion Replaces Volume Surge
         df_3m['body_abs'] = abs(df_3m['close'] - df_3m['open'])
         df_3m['avg_body_10'] = df_3m['body_abs'].rolling(10).mean().shift(1)
         df_3m = df_3m.reset_index()
@@ -95,7 +91,6 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             if not (is_bullish_trend or is_bearish_trend): continue
             stats['trend'] += 1
             
-            # Retracement to EMA 50 instead of VWAP
             bullish_retracement = is_bullish_trend and (c_low < c_ema9 or c_low < c_ema50) and (c_close > c_ema9 or c_close > c_ema50)
             bearish_retracement = is_bearish_trend and (c_high > c_ema9 or c_high > c_ema50) and (c_close < c_ema9 or c_close < c_ema50)
             
@@ -108,12 +103,10 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             if not color_ok: continue
             stats['color'] += 1
             
-            # Body Expansion instead of Volume
             expansion_ok = (c_body > avg_body) if require_expansion else True
             if not expansion_ok: continue
             stats['expansion'] += 1
             
-            # RSI Momentum instead of OBV
             rsi_ok = True
             if require_rsi_sma:
                 rsi_ok = (c_rsi > c_rsi_sma) if bullish_retracement else (c_rsi < c_rsi_sma)
@@ -130,9 +123,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             entries.append({'time': df_3m.loc[j+1, 'timestamp'], 'price': df_3m.loc[j+1, 'open'], 'type': trade_type, '3m_idx': j+1})
 
         log_func(f"🔎 Spot Diagnostic Funnel for {symbol}:")
-        log_func(f"   Bars Scanned: {stats['total']} | Passed Trend: {stats['trend']} | Passed Retrace (EMA50): {stats['retrace']}")
-        log_func(f"   Survived Filters -> Color: {stats['color']} | Body Expansion: {stats['expansion']} | RSI>SMA: {stats['rsi']} | 1H: {stats['h1']}")
-        log_func(f"🎯 Total Valid Executions: {len(entries)}")
+        log_func(f"   Bars Scanned: {stats['total']} | Passed Trend: {stats['trend']} | Passed Retrace: {stats['retrace']}")
         
         if not entries: continue
 
@@ -147,18 +138,45 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             
             if progress_callback: progress_callback(sym_idx + 1, total_symbols, f"[{symbol}] Processing Trade {idx+1}/{len(entries)}")
             
-            log_func(f"⚡ [{symbol}] Executing {trade_type} at {entry_time} (Spot Price: {entry_price})")
-
-            strat_name = "Bull Put Spread" if trade_type == 'PE_SPREAD' else "Bear Call Spread"
-            legs = build_spread_legs(symbol, entry_time, entry_price, strat_name, upstox_token, sell_offset=sell_offset, buy_offset=buy_offset, chain_cache=chain_cache, log_func=log_func)
-                
-            if len(legs) != 2:
-                log_func(f"⚠️ [{symbol}] Could not resolve exact option legs. Skipping.")
+            # -------------------------------------------------------------
+            # 🧠 TRADE INTELLIGENCE LAYER: Expiry Selection & Roll Rules
+            # -------------------------------------------------------------
+            trade_date = entry_time.date()
+            valid_expiries = get_available_expiries(symbol, trade_date, upstox_token)
+            
+            if not valid_expiries:
+                log_func(f"⚠️ [{symbol}] No expiries found for {trade_date}. Skipping.")
                 continue
+                
+            target_expiry = valid_expiries[0]
+            
+            # Smart Rollover Logic (Avoid 0DTE Margin/Gamma Risks)
+            if target_expiry == trade_date and len(valid_expiries) > 1:
+                target_expiry = valid_expiries[1]
+                log_func(f"🛡️ [STRATEGY RULE] 0DTE Detected! Rolling {symbol} to Next Week ({target_expiry})")
+            
+            strat_name = "Bull Put Spread" if trade_type == 'PE_SPREAD' else "Bear Call Spread"
+            
+            # 🔧 Pass exact explicit parameters to the Plumber
+            legs = build_spread_legs(
+                symbol=symbol, 
+                entry_price=entry_price, 
+                strategy_type=strat_name, 
+                target_expiry_date=target_expiry,  # <--- Plumber is told exactly what date to fetch
+                access_token=upstox_token, 
+                sell_offset=sell_offset, 
+                buy_offset=buy_offset, 
+                chain_cache=chain_cache, 
+                log_func=lambda x: None
+            )
+            # -------------------------------------------------------------
+                
+            if len(legs) != 2: continue
                 
             trade_lot_size = legs[0]['lot_size']
             fetch_end = entry_time + timedelta(days=10)
             leg_data = []
+            
             for leg in legs:
                 cache_key = f"{leg['key']}_{entry_time.date()}"
                 if cache_key not in api_cache:
@@ -174,9 +192,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             leg2_entry = get_premium_at_time(leg_data[1]['df'], entry_time)
             initial_net_credit = (leg1_entry * 1) - (leg2_entry * 1)
             
-            if initial_net_credit < 15.0:
-                log_func(f"⚠️ [{symbol}] Net credit (₹{initial_net_credit:.2f}) too low. Skipping.")
-                continue
+            if initial_net_credit < 15.0: continue
 
             spread_width = abs(legs[0]['strike'] - legs[1]['strike'])
             capital_employed = spread_width * trade_lot_size
@@ -184,11 +200,40 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             exit_time = df_3m.iloc[-1]['timestamp']
             exit_reason = "Data Ended"
             exit_bar_step = len(df_3m) - 1
+            
+            # -------------------------------------------------------------
+            # 🧠 TRADE INTELLIGENCE LAYER: Time Stops & Hard Exits
+            # -------------------------------------------------------------
+            max_hold_time = entry_time + timedelta(days=3)
 
             for step in range(start_3m_idx + 1, len(df_3m)):
                 curr_time = df_3m.loc[step, 'timestamp']
+                
+                # Rule 1: Maximum 3-Day Holding Limit
+                if curr_time > max_hold_time:
+                    exit_reason = "Time Stop (Max 3 Days Hit)"
+                    exit_time = curr_time
+                    exit_bar_step = step
+                    break
+                    
+                # Rule 2: Hard Exit on Monday @ 15:27 PM
+                if curr_time.weekday() == 0 and curr_time.time() >= dt.time(15, 27):
+                    exit_reason = "Monday Pre-Expiry Auto Square-Off"
+                    exit_time = curr_time
+                    exit_bar_step = step
+                    break
+                    
+                # Rule 3: Contract Expired Failsafe
+                last_available_premium_time = leg_data[0]['df'].iloc[-1]['timestamp']
+                if curr_time > last_available_premium_time:
+                    exit_reason = "Contract Expired (Failsafe Exit)"
+                    exit_time = last_available_premium_time
+                    exit_bar_step = step
+                    break
+
                 curr_spot_close = df_3m.loc[step, 'close']
                 
+                # Rule 4: Dynamic ATR Trailing Stops
                 matching_15m = df_15m[df_15m['timestamp'] <= curr_time]
                 if not matching_15m.empty:
                     m15_row = matching_15m.iloc[-1]
@@ -203,6 +248,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                         exit_bar_step = step
                         break
 
+                # Rule 5: Hard Fixed Premium Targets (50% Decay / 100% Loss)
                 l1_curr = get_premium_at_time(leg_data[0]['df'], curr_time)
                 l2_curr = get_premium_at_time(leg_data[1]['df'], curr_time)
                 current_spread_val = l1_curr - l2_curr
@@ -219,6 +265,9 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                     exit_bar_step = step
                     break
 
+            # -------------------------------------------------------------
+            # Calculate final results
+            # -------------------------------------------------------------
             l1_final = get_premium_at_time(leg_data[0]['df'], exit_time)
             l2_final = get_premium_at_time(leg_data[1]['df'], exit_time)
             final_spread_val = l1_final - l2_final
