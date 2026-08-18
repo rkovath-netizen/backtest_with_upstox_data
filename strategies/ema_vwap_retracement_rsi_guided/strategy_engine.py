@@ -53,13 +53,27 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
         df_3m = df_3m.reset_index()
         
         entries = []
-        stats = {'total': 0, 'trend': 0, 'retrace': 0, 'color': 0, 'expansion': 0, 'rsi': 0, 'h1': 0}
+        stats = {'total': 0, 'trend': 0, 'retrace': 0, 'color': 0, 'expansion': 0, 'rsi': 0, 'h1': 0, 'daily_limit_blocked': 0}
+        
+        # 🚨 NEW: Track number of trades per day to prevent risk concentration
+        trades_today = {}
         
         for j in range(1, len(df_3m) - 1):
             c_time = df_3m.loc[j, 'timestamp']
+            c_date = c_time.date()
+            
             if c_time < start_dt or c_time > end_dt: continue
             
+            # Initialize daily counter
+            if c_date not in trades_today:
+                trades_today[c_date] = 0
+                
             stats['total'] += 1
+            
+            # 🚨 FILTER: Stop scanning if we hit the daily cap (3 trades)
+            if trades_today[c_date] >= 3:
+                stats['daily_limit_blocked'] += 1
+                continue
                 
             matching_1h = df_1h[df_1h['timestamp'] <= c_time]
             if matching_1h.empty: continue
@@ -121,9 +135,13 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             
             trade_type = 'PE_SPREAD' if bullish_retracement else 'CE_SPREAD'
             entries.append({'time': df_3m.loc[j+1, 'timestamp'], 'price': df_3m.loc[j+1, 'open'], 'type': trade_type, '3m_idx': j+1})
+            
+            # Increment daily limit counter
+            trades_today[c_date] += 1
 
         log_func(f"🔎 Spot Diagnostic Funnel for {symbol}:")
         log_func(f"   Bars Scanned: {stats['total']} | Passed Trend: {stats['trend']} | Passed Retrace: {stats['retrace']}")
+        log_func(f"   Blocked by Max 3/Day Limit: {stats['daily_limit_blocked']}")
         
         if not entries: continue
 
@@ -150,7 +168,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                 
             target_expiry = valid_expiries[0]
             
-            # Smart Rollover Logic (Avoid 0DTE Margin/Gamma Risks)
+            # 🚨 Smart Rollover Logic (Avoid 0DTE Margin/Gamma Risks)
             if target_expiry == trade_date and len(valid_expiries) > 1:
                 target_expiry = valid_expiries[1]
                 log_func(f"🛡️ [STRATEGY RULE] 0DTE Detected! Rolling {symbol} to Next Week ({target_expiry})")
@@ -162,7 +180,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                 symbol=symbol, 
                 entry_price=entry_price, 
                 strategy_type=strat_name, 
-                target_expiry_date=target_expiry,  # <--- Plumber is told exactly what date to fetch
+                target_expiry_date=target_expiry, 
                 access_token=upstox_token, 
                 sell_offset=sell_offset, 
                 buy_offset=buy_offset, 
@@ -204,6 +222,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             # -------------------------------------------------------------
             # 🧠 TRADE INTELLIGENCE LAYER: Time Stops & Hard Exits
             # -------------------------------------------------------------
+            # 🚨 Maximum 3-Day Holding Limit
             max_hold_time = entry_time + timedelta(days=3)
 
             for step in range(start_3m_idx + 1, len(df_3m)):
@@ -223,7 +242,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                     exit_bar_step = step
                     break
                     
-                # Rule 3: Contract Expired Failsafe
+                # Rule 3: Contract Expired Failsafe (Fix for Infinite Hold Bug)
                 last_available_premium_time = leg_data[0]['df'].iloc[-1]['timestamp']
                 if curr_time > last_available_premium_time:
                     exit_reason = "Contract Expired (Failsafe Exit)"
