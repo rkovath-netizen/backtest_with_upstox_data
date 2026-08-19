@@ -105,7 +105,7 @@ def get_available_expiries(symbol, target_date, access_token, log_func=print):
     spot_sym = symbol.upper()
     if spot_sym == 'NIFTY': spot_sym = 'NIFTY 50'
     elif spot_sym == 'BANKNIFTY': spot_sym = 'NIFTY BANK'
-    elif spot_sym == 'SENSEX': spot_sym = 'BSX'
+    #elif spot_sym == 'SENSEX': spot_sym = 'BSX'
     
     valid_ex = ['NSE_FO', 'BSE_FO', 'MCX_FO']
     
@@ -144,7 +144,7 @@ def get_target_option_chain(symbol, target_expiry, access_token, chain_cache=Non
     
     spot_sym = symbol.upper()
     if spot_sym == 'NIFTY': spot_sym = 'NIFTY 50'
-    elif spot_sym == 'SENSEX': spot_sym = 'BSX'
+    #elif spot_sym == 'SENSEX': spot_sym = 'BSX'
     
     is_expired = target_expiry < current_date
     
