@@ -97,6 +97,16 @@ def run_ema_rsi_app():
         log_container.write(msg)
 
     if st.button("🚀 Run Backtest"):
+        trades_df = process_ema_rsi_guided_strategy(
+                symbols=symbols_selected,
+                # ... existing parameters ...
+                require_adx=require_adx,
+                adx_threshold=adx_threshold,
+                ltf=ltf_choice,
+                max_concurrent_trades=max_concurrent, # 🚨 ADD THIS LINE
+                progress_callback=update_progress,
+                log_func=log_message
+            )
         if not symbols_selected:
             st.error("❌ Please select at least one index to scan.")
             return
