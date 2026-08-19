@@ -284,15 +284,18 @@ def run_live_scanner(symbols, upstox_token, require_color=False, require_expansi
         curr_1h = df_1h.iloc[-1]
 
         df_15m = spot_1m.set_index('timestamp').resample('15min').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
-        df_15m['EMA_9'], df_15m['EMA_21'] = ta.ema(df_15m['close'], length=9), ta.ema(df_15m['close'], length=21)
-        df_15m['RSI_14'], df_15m['RSI_SMA_14'] = ta.rsi(df_15m['close'], length=14), ta.sma(df_15m['RSI_14'], length=14)
+        df_15m['EMA_9'] = ta.ema(df_15m['close'], length=9)
+        df_15m['EMA_21'] = ta.ema(df_15m['close'], length=21)
+        df_15m['RSI_14'] = ta.rsi(df_15m['close'], length=14)
+        df_15m['RSI_SMA_14'] = ta.sma(df_15m['RSI_14'], length=14)
         
         adx_df = ta.adx(df_15m['high'], df_15m['low'], df_15m['close'], length=14)
         df_15m['ADX_14'] = adx_df['ADX_14'] if (adx_df is not None and not adx_df.empty) else 0.0
         curr_15m = df_15m.iloc[-1]
 
         df_ltf = spot_1m.set_index('timestamp').resample(ltf).agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
-        df_ltf['EMA_9'], df_ltf['EMA_50'] = ta.ema(df_ltf['close'], length=9), ta.ema(df_ltf['close'], length=50)
+        df_ltf['EMA_9'] = ta.ema(df_ltf['close'], length=9)
+        df_ltf['EMA_50'] = ta.ema(df_ltf['close'], length=50)
         
         if len(df_ltf) < 2: continue
         curr_ltf, last_time = df_ltf.iloc[-2], df_ltf.index[-2]
