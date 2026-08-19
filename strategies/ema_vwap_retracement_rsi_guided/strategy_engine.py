@@ -3,8 +3,8 @@ import pandas_ta as ta
 import datetime as dt
 from datetime import timedelta, datetime
 from common.market_data import fetch_upstox_intraday_candles, get_available_expiries
-from common.options_builder import build_spread_legs
 from common.market_calendar import resolve_expiry
+from common.options_builder import build_spread_legs
 
 def get_premium_at_time(df, target_time):
     past = df[df['timestamp'] <= target_time]
@@ -12,12 +12,13 @@ def get_premium_at_time(df, target_time):
 
 def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token, sell_offset=2, buy_offset=4, 
                                     require_color=False, require_expansion=False, require_rsi_sma=True, require_1h_sma=True, 
+                                    require_adx=True, adx_threshold=20.0, ltf="3min", # 🚨 NEW CUSTOMIZABLE FILTERS
                                     progress_callback=None, log_func=print):
     all_trades = []
     total_symbols = len(symbols)
     
     for sym_idx, symbol in enumerate(symbols):
-        log_func(f"\n========================================\n🚀 Processing {symbol} (Pure Price Spot Strategy)\n========================================")
+        log_func(f"\n========================================\n🚀 Processing {symbol} (Pure Price Spot Strategy | LTF: {ltf})\n========================================")
         
         start_dt = datetime.combine(start_date, datetime.min.time())
         end_dt = datetime.combine(end_date, datetime.max.time())
@@ -29,53 +30,50 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
 
         actual_start = spot_1m['timestamp'].min().strftime('%Y-%m-%d')
         actual_end = spot_1m['timestamp'].max().strftime('%Y-%m-%d')
-        log_func(f"📊 Resampling {symbol} SPOT (Data: {actual_start} to {actual_end}) to 1H, 15m, and 3m...")
+        log_func(f"📊 Resampling {symbol} SPOT (Data: {actual_start} to {actual_end}) to 1H, 15m, and {ltf}...")
         
+        # 1H Timeframe
         df_1h = spot_1m.set_index('timestamp').resample('1h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
         df_1h['SMA_20'] = ta.sma(df_1h['close'], length=20)
         df_1h = df_1h.reset_index()
 
+        # 15m Timeframe
         df_15m = spot_1m.set_index('timestamp').resample('15min').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
         df_15m['EMA_9'] = ta.ema(df_15m['close'], length=9)
         df_15m['EMA_21'] = ta.ema(df_15m['close'], length=21)
         df_15m['RSI_14'] = ta.rsi(df_15m['close'], length=14)
         df_15m['RSI_SMA_14'] = ta.sma(df_15m['RSI_14'], length=14)
+        
+        # 🚨 ADX Calculation (Trend Strength)
+        adx_df = ta.adx(df_15m['high'], df_15m['low'], df_15m['close'], length=14)
+        if adx_df is not None and not adx_df.empty:
+            df_15m['ADX_14'] = adx_df['ADX_14']
+        else:
+            df_15m['ADX_14'] = 0.0
+
         atr_15m = ta.atr(df_15m['high'], df_15m['low'], df_15m['close'], length=14)
         df_15m['ATR_Trailing_Long'] = df_15m['close'] - (3 * atr_15m)
         df_15m['ATR_Trailing_Short'] = df_15m['close'] + (3 * atr_15m)
         df_15m = df_15m.reset_index()
 
-        df_3m = spot_1m.set_index('timestamp').resample('3min').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
-        df_3m['EMA_9'] = ta.ema(df_3m['close'], length=9)
-        df_3m['EMA_50'] = ta.ema(df_3m['close'], length=50)
-        
-        df_3m['body_abs'] = abs(df_3m['close'] - df_3m['open'])
-        df_3m['avg_body_10'] = df_3m['body_abs'].rolling(10).mean().shift(1)
-        df_3m = df_3m.reset_index()
+        # Dynamic Lower Timeframe (LTF)
+        df_ltf = spot_1m.set_index('timestamp').resample(ltf).agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
+        df_ltf['EMA_9'] = ta.ema(df_ltf['close'], length=9)
+        df_ltf['EMA_50'] = ta.ema(df_ltf['close'], length=50)
+        df_ltf['body_abs'] = abs(df_ltf['close'] - df_ltf['open'])
+        df_ltf['avg_body_10'] = df_ltf['body_abs'].rolling(10).mean().shift(1)
+        df_ltf = df_ltf.reset_index()
         
         entries = []
-        stats = {'total': 0, 'trend': 0, 'retrace': 0, 'color': 0, 'expansion': 0, 'rsi': 0, 'h1': 0, 'daily_limit_blocked': 0}
+        stats = {'total': 0, 'adx_blocked': 0, 'trend': 0, 'retrace': 0, 'color': 0, 'expansion': 0, 'rsi': 0, 'h1': 0}
         
-        # 🚨 NEW: Track number of trades per day to prevent risk concentration
-        trades_today = {}
-        
-        for j in range(1, len(df_3m) - 1):
-            c_time = df_3m.loc[j, 'timestamp']
-            c_date = c_time.date()
+        for j in range(1, len(df_ltf) - 1):
+            c_time = df_ltf.loc[j, 'timestamp']
             
             if c_time < start_dt or c_time > end_dt: continue
-            
-            # Initialize daily counter
-            if c_date not in trades_today:
-                trades_today[c_date] = 0
                 
             stats['total'] += 1
-            
-            # 🚨 FILTER: Stop scanning if we hit the daily cap (3 trades)
-            if trades_today[c_date] >= 3:
-                stats['daily_limit_blocked'] += 1
-                continue
-                
+
             matching_1h = df_1h[df_1h['timestamp'] <= c_time]
             if matching_1h.empty: continue
             curr_1h = matching_1h.iloc[-1]
@@ -90,15 +88,22 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             ema21_15 = curr_15m['EMA_21']
             c_rsi = curr_15m['RSI_14']
             c_rsi_sma = curr_15m['RSI_SMA_14']
+            c_adx = curr_15m['ADX_14']
             
-            c_open = df_3m.loc[j, 'open']
-            c_low = df_3m.loc[j, 'low']
-            c_high = df_3m.loc[j, 'high']
-            c_close = df_3m.loc[j, 'close']
-            c_ema9 = df_3m.loc[j, 'EMA_9']
-            c_ema50 = df_3m.loc[j, 'EMA_50']
-            c_body = df_3m.loc[j, 'body_abs']
-            avg_body = df_3m.loc[j, 'avg_body_10']
+            # 🚨 FILTER: ADX Trend Strength Check
+            if require_adx:
+                if pd.isna(c_adx) or c_adx < adx_threshold:
+                    stats['adx_blocked'] += 1
+                    continue
+            
+            c_open = df_ltf.loc[j, 'open']
+            c_low = df_ltf.loc[j, 'low']
+            c_high = df_ltf.loc[j, 'high']
+            c_close = df_ltf.loc[j, 'close']
+            c_ema9 = df_ltf.loc[j, 'EMA_9']
+            c_ema50 = df_ltf.loc[j, 'EMA_50']
+            c_body = df_ltf.loc[j, 'body_abs']
+            avg_body = df_ltf.loc[j, 'avg_body_10']
             
             is_bullish_trend = ema9_15 > ema21_15
             is_bearish_trend = ema9_15 < ema21_15
@@ -135,14 +140,11 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             stats['h1'] += 1
             
             trade_type = 'PE_SPREAD' if bullish_retracement else 'CE_SPREAD'
-            entries.append({'time': df_3m.loc[j+1, 'timestamp'], 'price': df_3m.loc[j+1, 'open'], 'type': trade_type, '3m_idx': j+1})
-            
-            # Increment daily limit counter
-            trades_today[c_date] += 1
+            entries.append({'time': df_ltf.loc[j+1, 'timestamp'], 'price': df_ltf.loc[j+1, 'open'], 'type': trade_type, 'ltf_idx': j+1})
 
-        log_func(f"🔎 Spot Diagnostic Funnel for {symbol}:")
-        log_func(f"   Bars Scanned: {stats['total']} | Passed Trend: {stats['trend']} | Passed Retrace: {stats['retrace']}")
-        log_func(f"   Blocked by Max 3/Day Limit: {stats['daily_limit_blocked']}")
+        log_func(f"🔎 Spot Diagnostic Funnel for {symbol} ({ltf}):")
+        log_func(f"   Bars Scanned: {stats['total']} | Blocked by ADX (<{adx_threshold}): {stats['adx_blocked']}")
+        log_func(f"   Passed Trend: {stats['trend']} | Passed Retrace: {stats['retrace']}")
         
         if not entries: continue
 
@@ -153,7 +155,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             entry_time = trade['time']
             entry_price = trade['price']
             trade_type = trade['type']
-            start_3m_idx = trade['3m_idx']
+            start_ltf_idx = trade['ltf_idx']
             
             if progress_callback: progress_callback(sym_idx + 1, total_symbols, f"[{symbol}] Processing Trade {idx+1}/{len(entries)}")
             
@@ -162,10 +164,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             # -------------------------------------------------------------
             trade_date = entry_time.date()
             
-            # 1. Ask Data Layer for Raw Expiries
-            raw_expiries = get_available_expiries(symbol, trade_date, upstox_token, log_func=log_func)
-            
-            # 2. Ask Calendar Engine to resolve Limbo gaps mathematically
+            raw_expiries = get_available_expiries(symbol, trade_date, upstox_token, log_func=lambda x: None)
             valid_expiries = resolve_expiry(symbol, trade_date, raw_expiries, log_func=log_func)
             
             if not valid_expiries:
@@ -174,15 +173,13 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                 
             target_expiry = valid_expiries[0]
             
-            # 🚨 Smart Rollover Logic (Avoid 0DTE Margin/Gamma Risks)
+            # Smart Rollover Logic (Avoid 0DTE Margin/Gamma Risks)
             if target_expiry == trade_date and len(valid_expiries) > 1:
                 target_expiry = valid_expiries[1]
                 log_func(f"🛡️ [STRATEGY RULE] 0DTE Detected! Rolling {symbol} to Next Week ({target_expiry})")
             
-                    
             strat_name = "Bull Put Spread" if trade_type == 'PE_SPREAD' else "Bear Call Spread"
             
-            # 🔧 Pass exact explicit parameters to the Plumber
             legs = build_spread_legs(
                 symbol=symbol, 
                 entry_price=entry_price, 
@@ -208,8 +205,8 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                     api_cache[cache_key] = fetch_upstox_intraday_candles(leg['key'], entry_time - timedelta(days=1), fetch_end, upstox_token, is_key=True, is_expired=leg['is_expired'], log_func=lambda x: None)
                 df_1m_leg = api_cache[cache_key]
                 if not df_1m_leg.empty:
-                    df_3m_leg = df_1m_leg.set_index('timestamp').resample('3min').agg({'close': 'last'}).dropna().reset_index()
-                    leg_data.append({'side': leg['side'], 'df': df_3m_leg})
+                    df_ltf_leg = df_1m_leg.set_index('timestamp').resample(ltf).agg({'close': 'last'}).dropna().reset_index()
+                    leg_data.append({'side': leg['side'], 'df': df_ltf_leg})
 
             if len(leg_data) != 2: continue
 
@@ -222,18 +219,14 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             spread_width = abs(legs[0]['strike'] - legs[1]['strike'])
             capital_employed = spread_width * trade_lot_size
 
-            exit_time = df_3m.iloc[-1]['timestamp']
+            exit_time = df_ltf.iloc[-1]['timestamp']
             exit_reason = "Data Ended"
-            exit_bar_step = len(df_3m) - 1
+            exit_bar_step = len(df_ltf) - 1
             
-            # -------------------------------------------------------------
-            # 🧠 TRADE INTELLIGENCE LAYER: Time Stops & Hard Exits
-            # -------------------------------------------------------------
-            # 🚨 Maximum 3-Day Holding Limit
             max_hold_time = entry_time + timedelta(days=3)
 
-            for step in range(start_3m_idx + 1, len(df_3m)):
-                curr_time = df_3m.loc[step, 'timestamp']
+            for step in range(start_ltf_idx + 1, len(df_ltf)):
+                curr_time = df_ltf.loc[step, 'timestamp']
                 
                 # Rule 1: Maximum 3-Day Holding Limit
                 if curr_time > max_hold_time:
@@ -249,7 +242,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                     exit_bar_step = step
                     break
                     
-                # Rule 3: Contract Expired Failsafe (Fix for Infinite Hold Bug)
+                # Rule 3: Contract Expired Failsafe
                 last_available_premium_time = leg_data[0]['df'].iloc[-1]['timestamp']
                 if curr_time > last_available_premium_time:
                     exit_reason = "Contract Expired (Failsafe Exit)"
@@ -257,7 +250,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                     exit_bar_step = step
                     break
 
-                curr_spot_close = df_3m.loc[step, 'close']
+                curr_spot_close = df_ltf.loc[step, 'close']
                 
                 # Rule 4: Dynamic ATR Trailing Stops
                 matching_15m = df_15m[df_15m['timestamp'] <= curr_time]
@@ -274,7 +267,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                         exit_bar_step = step
                         break
 
-                # Rule 5: Hard Fixed Premium Targets (50% Decay / 100% Loss)
+                # Rule 5: Hard Fixed Premium Targets
                 l1_curr = get_premium_at_time(leg_data[0]['df'], curr_time)
                 l2_curr = get_premium_at_time(leg_data[1]['df'], curr_time)
                 current_spread_val = l1_curr - l2_curr
@@ -291,15 +284,13 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                     exit_bar_step = step
                     break
 
-            # -------------------------------------------------------------
             # Calculate final results
-            # -------------------------------------------------------------
             l1_final = get_premium_at_time(leg_data[0]['df'], exit_time)
             l2_final = get_premium_at_time(leg_data[1]['df'], exit_time)
             final_spread_val = l1_final - l2_final
             
             exit_pnl_abs = (initial_net_credit - final_spread_val) * trade_lot_size
-            bars_in_trade = exit_bar_step - start_3m_idx
+            bars_in_trade = exit_bar_step - start_ltf_idx
             pnl_pct = (exit_pnl_abs / capital_employed * 100) if capital_employed > 0 else 0.0
 
             all_trades.append({
