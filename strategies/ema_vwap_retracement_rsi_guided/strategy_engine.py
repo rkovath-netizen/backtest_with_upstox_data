@@ -161,11 +161,15 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             # 🧠 TRADE INTELLIGENCE LAYER: Expiry Selection & Roll Rules
             # -------------------------------------------------------------
             trade_date = entry_time.date()
-            # 🚨 Added log_func=log_func to pipe the debug text to the UI
-            valid_expiries = get_available_expiries(symbol, trade_date, upstox_token, log_func=log_func)
+            
+            # 1. Ask Data Layer for Raw Expiries
+            raw_expiries = get_available_expiries(symbol, trade_date, upstox_token, log_func=log_func)
+            
+            # 2. Ask Calendar Engine to resolve Limbo gaps mathematically
+            valid_expiries = resolve_expiry(symbol, trade_date, raw_expiries, log_func=log_func)
             
             if not valid_expiries:
-                log_func(f"⚠️ [{symbol}] No expiries found for {trade_date}. Skipping.")
+                log_func(f"⚠️ [{symbol}] Critical failure: No expiries calculable for {trade_date}. Skipping.")
                 continue
                 
             target_expiry = valid_expiries[0]
@@ -175,6 +179,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                 target_expiry = valid_expiries[1]
                 log_func(f"🛡️ [STRATEGY RULE] 0DTE Detected! Rolling {symbol} to Next Week ({target_expiry})")
             
+                    
             strat_name = "Bull Put Spread" if trade_type == 'PE_SPREAD' else "Bear Call Spread"
             
             # 🔧 Pass exact explicit parameters to the Plumber
