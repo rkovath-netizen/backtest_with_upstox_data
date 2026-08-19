@@ -53,13 +53,7 @@ def run_ema_rsi_app():
             help="Signals with 15m ADX below this level will be blocked as sideways chop."
         )
 
-    # 🎯 Strike Configuration
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 🎯 Strike Configuration")
-    sell_offset = st.sidebar.number_input("Sell Leg OTM Offset", min_value=0, max_value=10, value=0, step=1)
-    buy_offset = st.sidebar.number_input("Buy Hedge OTM Offset", min_value=1, max_value=15, value=2, step=1)
-
-    # 🛡️ Risk Management
+    # 🛡️ Risk Management (Concurrency)
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🛡️ Risk Management")
     max_concurrent = st.sidebar.number_input(
@@ -67,7 +61,13 @@ def run_ema_rsi_app():
         min_value=1, max_value=10, value=2, step=1,
         help="Prevents risk stacking by limiting how many trades can be open simultaneously."
     )
-    
+
+    # 🎯 Strike Configuration
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🎯 Strike Configuration")
+    sell_offset = st.sidebar.number_input("Sell Leg OTM Offset", min_value=0, max_value=10, value=0, step=1)
+    buy_offset = st.sidebar.number_input("Buy Hedge OTM Offset", min_value=1, max_value=15, value=2, step=1)
+
     # 📅 Date Range
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 📅 Date Range")
@@ -77,14 +77,14 @@ def run_ema_rsi_app():
     start_date = st.sidebar.date_input("Start Date", value=default_start)
     end_date = st.sidebar.date_input("End Date", value=default_end)
 
-    # Token Retrieval (Silent & Secure)
+    # -------------------------------------------------------------
+    # 🔑 Token Retrieval (Silent & Secure)
+    # -------------------------------------------------------------
     if "UPSTOX_ACCESS_TOKEN" in st.secrets:
         upstox_token = st.secrets["UPSTOX_ACCESS_TOKEN"]
     elif "UPSTOX_TOKEN" in st.secrets:
-        # Fallback for common secret naming
         upstox_token = st.secrets["UPSTOX_TOKEN"]
     else:
-        # Final fallback if it's being passed from main_dashboard.py
         upstox_token = st.session_state.get("upstox_access_token", "")
 
     # -------------------------------------------------------------
@@ -97,22 +97,12 @@ def run_ema_rsi_app():
         log_container.write(msg)
 
     if st.button("🚀 Run Backtest"):
-        trades_df = process_ema_rsi_guided_strategy(
-                symbols=symbols_selected,
-                # ... existing parameters ...
-                require_adx=require_adx,
-                adx_threshold=adx_threshold,
-                ltf=ltf_choice,
-                max_concurrent_trades=max_concurrent, # 🚨 ADD THIS LINE
-                progress_callback=update_progress,
-                log_func=log_message
-            )
         if not symbols_selected:
             st.error("❌ Please select at least one index to scan.")
             return
 
         if not upstox_token:
-            st.error("❌ Upstox Access Token is required to fetch historical market data.")
+            st.error("❌ Upstox Access Token is missing from Streamlit secrets.")
             return
 
         progress_bar = st.progress(0)
@@ -137,6 +127,7 @@ def run_ema_rsi_app():
                 require_adx=require_adx,
                 adx_threshold=adx_threshold,
                 ltf=ltf_choice,
+                max_concurrent_trades=max_concurrent,
                 progress_callback=update_progress,
                 log_func=log_message
             )
