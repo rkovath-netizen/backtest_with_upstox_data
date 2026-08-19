@@ -68,10 +68,15 @@ def run_ema_rsi_app():
     start_date = st.sidebar.date_input("Start Date", value=default_start)
     end_date = st.sidebar.date_input("End Date", value=default_end)
 
-    # Token Retrieval
-    upstox_token = st.session_state.get("upstox_access_token", "")
-    if not upstox_token:
-        upstox_token = st.sidebar.text_input("Upstox Access Token", type="password")
+    # Token Retrieval (Silent & Secure)
+    if "UPSTOX_ACCESS_TOKEN" in st.secrets:
+        upstox_token = st.secrets["UPSTOX_ACCESS_TOKEN"]
+    elif "UPSTOX_TOKEN" in st.secrets:
+        # Fallback for common secret naming
+        upstox_token = st.secrets["UPSTOX_TOKEN"]
+    else:
+        # Final fallback if it's being passed from main_dashboard.py
+        upstox_token = st.session_state.get("upstox_access_token", "")
 
     # -------------------------------------------------------------
     # 🚀 Main Execution Section
