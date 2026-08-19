@@ -6,6 +6,11 @@ from common.market_data import fetch_upstox_intraday_candles, get_available_expi
 from common.market_calendar import resolve_expiry
 from common.options_builder import build_spread_legs
 
+def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token, sell_offset=2, buy_offset=4, 
+                                    require_color=False, require_expansion=False, require_rsi_sma=True, require_1h_sma=True, 
+                                    require_adx=True, adx_threshold=20.0, ltf="3min", max_concurrent_trades=2, # 🚨 ADDED HERE
+                                    progress_callback=None, log_func=print):
+
 def get_premium_at_time(df, target_time):
     past = df[df['timestamp'] <= target_time]
     return past.iloc[-1]['close'] if not past.empty else 0.0
