@@ -6,18 +6,13 @@ from common.market_data import fetch_upstox_intraday_candles, get_available_expi
 from common.market_calendar import resolve_expiry
 from common.options_builder import build_spread_legs
 
-def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token, sell_offset=2, buy_offset=4, 
-                                    require_color=False, require_expansion=False, require_rsi_sma=True, require_1h_sma=True, 
-                                    require_adx=True, adx_threshold=20.0, ltf="3min", max_concurrent_trades=2, # 🚨 ADDED HERE
-                                    progress_callback=None, log_func=print):
-
 def get_premium_at_time(df, target_time):
     past = df[df['timestamp'] <= target_time]
     return past.iloc[-1]['close'] if not past.empty else 0.0
 
 def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token, sell_offset=2, buy_offset=4, 
                                     require_color=False, require_expansion=False, require_rsi_sma=True, require_1h_sma=True, 
-                                    require_adx=True, adx_threshold=20.0, ltf="3min", 
+                                    require_adx=True, adx_threshold=20.0, ltf="3min", max_concurrent_trades=2, 
                                     progress_callback=None, log_func=print):
     all_trades = []
     total_symbols = len(symbols)
@@ -173,11 +168,23 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
         api_cache = {}
         chain_cache = {}
         
+        # 🚨 CONCURRENCY QUEUE TRACKING
+        active_exits = []
+        concurrency_blocked = 0
+        
         for idx, trade in enumerate(entries):
             entry_time = trade['time']
             entry_price = trade['price']
             trade_type = trade['type']
             start_ltf_idx = trade['ltf_idx']
+            
+            # 🚨 CHECK CONCURRENCY LIMIT
+            # Clear out trades that have successfully exited prior to this new signal
+            active_exits = [ext for ext in active_exits if ext > entry_time]
+            
+            if len(active_exits) >= max_concurrent_trades:
+                concurrency_blocked += 1
+                continue # Prevent risk stacking: Max concurrent trades reached
             
             if progress_callback: progress_callback(sym_idx + 1, total_symbols, f"[{symbol}] Processing Trade {idx+1}/{len(entries)}")
             
@@ -300,7 +307,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                     exit_time = curr_time
                     exit_bar_step = step
                     break
-                # 🚨 TIGHTENED SENSEX & NIFTY STOP LOSS (60% instead of 100%)
+                # 🚨 60% TIGHTENED STOP LOSS
                 elif current_pnl_per_qty <= (-0.60 * initial_net_credit):
                     exit_reason = "SL Hit (60% Premium Appreciation)"
                     exit_time = curr_time
@@ -332,5 +339,11 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                 'PnL (₹)': round(exit_pnl_abs, 2),
                 'PnL (%)': round(pnl_pct, 2)
             })
+            
+            # 🚨 RECORD THE EXIT TIME FOR CONCURRENCY TRACKING
+            active_exits.append(exit_time)
+
+        if concurrency_blocked > 0:
+            log_func(f"   🛡️ Blocked by Max Concurrency Limit ({max_concurrent_trades}): {concurrency_blocked} trades skipped.")
 
     return pd.DataFrame(all_trades)
