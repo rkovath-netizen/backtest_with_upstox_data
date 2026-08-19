@@ -59,6 +59,15 @@ def run_ema_rsi_app():
     sell_offset = st.sidebar.number_input("Sell Leg OTM Offset", min_value=0, max_value=10, value=0, step=1)
     buy_offset = st.sidebar.number_input("Buy Hedge OTM Offset", min_value=1, max_value=15, value=2, step=1)
 
+    # 🛡️ Risk Management
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🛡️ Risk Management")
+    max_concurrent = st.sidebar.number_input(
+        "Max Concurrent Trades (Per Symbol)", 
+        min_value=1, max_value=10, value=2, step=1,
+        help="Prevents risk stacking by limiting how many trades can be open simultaneously."
+    )
+    
     # 📅 Date Range
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 📅 Date Range")
