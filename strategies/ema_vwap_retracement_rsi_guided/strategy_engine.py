@@ -12,7 +12,7 @@ def get_premium_at_time(df, target_time):
 
 def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token, sell_offset=2, buy_offset=4, 
                                     require_color=False, require_expansion=False, require_rsi_sma=True, require_1h_sma=True, 
-                                    require_adx=True, adx_threshold=20.0, ltf="3min", # 🚨 NEW CUSTOMIZABLE FILTERS
+                                    require_adx=True, adx_threshold=20.0, ltf="3min", 
                                     progress_callback=None, log_func=print):
     all_trades = []
     total_symbols = len(symbols)
@@ -44,7 +44,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
         df_15m['RSI_14'] = ta.rsi(df_15m['close'], length=14)
         df_15m['RSI_SMA_14'] = ta.sma(df_15m['RSI_14'], length=14)
         
-        # 🚨 ADX Calculation (Trend Strength)
+        # ADX Calculation (Trend Strength)
         adx_df = ta.adx(df_15m['high'], df_15m['low'], df_15m['close'], length=14)
         if adx_df is not None and not adx_df.empty:
             df_15m['ADX_14'] = adx_df['ADX_14']
@@ -65,7 +65,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
         df_ltf = df_ltf.reset_index()
         
         entries = []
-        stats = {'total': 0, 'adx_blocked': 0, 'trend': 0, 'retrace': 0, 'color': 0, 'expansion': 0, 'rsi': 0, 'h1': 0}
+        stats = {'total': 0, 'adx_blocked': 0, 'sensex_blocked': 0, 'trend': 0, 'retrace': 0, 'color': 0, 'expansion': 0, 'rsi': 0, 'h1': 0}
         
         for j in range(1, len(df_ltf) - 1):
             c_time = df_ltf.loc[j, 'timestamp']
@@ -73,6 +73,21 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             if c_time < start_dt or c_time > end_dt: continue
                 
             stats['total'] += 1
+
+            # -------------------------------------------------------------
+            # 🛡️ SENSEX-SPECIFIC RISK CONTROLS
+            # -------------------------------------------------------------
+            if symbol == "SENSEX":
+                # 1. The Friday Premium Trap (Block Fridays)
+                if c_time.weekday() == 4:
+                    stats['sensex_blocked'] += 1
+                    continue
+                    
+                # 2. The Afternoon Trap (Block after 1:00 PM)
+                if c_time.time() >= dt.time(13, 0):
+                    stats['sensex_blocked'] += 1
+                    continue
+            # -------------------------------------------------------------
 
             matching_1h = df_1h[df_1h['timestamp'] <= c_time]
             if matching_1h.empty: continue
@@ -90,7 +105,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             c_rsi_sma = curr_15m['RSI_SMA_14']
             c_adx = curr_15m['ADX_14']
             
-            # 🚨 FILTER: ADX Trend Strength Check
+            # FILTER: ADX Trend Strength Check
             if require_adx:
                 if pd.isna(c_adx) or c_adx < adx_threshold:
                     stats['adx_blocked'] += 1
@@ -144,6 +159,8 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
 
         log_func(f"🔎 Spot Diagnostic Funnel for {symbol} ({ltf}):")
         log_func(f"   Bars Scanned: {stats['total']} | Blocked by ADX (<{adx_threshold}): {stats['adx_blocked']}")
+        if symbol == "SENSEX":
+            log_func(f"   Blocked by SENSEX Risk Filters (Fri / After 1PM): {stats['sensex_blocked']}")
         log_func(f"   Passed Trend: {stats['trend']} | Passed Retrace: {stats['retrace']}")
         
         if not entries: continue
@@ -278,8 +295,9 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                     exit_time = curr_time
                     exit_bar_step = step
                     break
-                elif current_pnl_per_qty <= (-1.00 * initial_net_credit):
-                    exit_reason = "SL Hit (100% Premium Appreciation)"
+                # 🚨 TIGHTENED SENSEX & NIFTY STOP LOSS (60% instead of 100%)
+                elif current_pnl_per_qty <= (-0.60 * initial_net_credit):
+                    exit_reason = "SL Hit (60% Premium Appreciation)"
                     exit_time = curr_time
                     exit_bar_step = step
                     break
