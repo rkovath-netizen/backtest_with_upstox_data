@@ -2,6 +2,7 @@ import streamlit as st
 import datetime as dt
 import pandas as pd
 import time
+import traceback
 from datetime import timedelta
 from strategies.ema_vwap_retracement_rsi_guided.strategy_engine import process_ema_rsi_guided_strategy, run_live_scanner
 
@@ -36,32 +37,18 @@ def run_ema_rsi_app():
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🚦 Entry Conditions")
     require_color = st.sidebar.checkbox("Require Trend Candle Color", value=False)
-    require_expansion = st.sidebar.checkbox("Require Body Expansion (>Avg)", value=False, help="Requires candle body to be larger than 10-bar average.")
-    require_rsi_sma = st.sidebar.checkbox("Require 15m RSI > RSI SMA", value=True, help="Validates momentum using 15m RSI vs 14 SMA.")
-    require_1h_sma = st.sidebar.checkbox("Require 1h Close > SMA 20", value=True, help="Confirms macro trend alignment on 1H chart.")
+    require_expansion = st.sidebar.checkbox("Require Body Expansion (>Avg)", value=False)
+    require_rsi_sma = st.sidebar.checkbox("Require 15m RSI > RSI SMA", value=True)
+    require_1h_sma = st.sidebar.checkbox("Require 1h Close > SMA 20", value=True)
 
     # 🚨 ADX Trend Strength Filter
-    require_adx = st.sidebar.checkbox("Require 15m ADX Filter", value=True, help="Filters out signals when market is in sideways consolidation.")
-    
-    adx_threshold = 20.0
-    if require_adx:
-        adx_threshold = st.sidebar.number_input(
-            "Min 15m ADX Threshold",
-            min_value=10.0,
-            max_value=50.0,
-            value=20.0,
-            step=1.0,
-            help="Signals with 15m ADX below this level will be blocked as sideways chop."
-        )
+    require_adx = st.sidebar.checkbox("Require 15m ADX Filter", value=True)
+    adx_threshold = st.sidebar.number_input("Min 15m ADX Threshold", min_value=10.0, max_value=50.0, value=20.0, step=1.0)
 
     # 🛡️ Risk Management (Concurrency)
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🛡️ Risk Management")
-    max_concurrent = st.sidebar.number_input(
-        "Max Concurrent Trades (Per Symbol)", 
-        min_value=1, max_value=10, value=3, step=1,
-        help="Prevents risk stacking by limiting how many trades can be open simultaneously."
-    )
+    max_concurrent = st.sidebar.number_input("Max Concurrent Trades (Per Symbol)", min_value=1, max_value=10, value=3, step=1)
 
     # 🎯 Strike Configuration
     st.sidebar.markdown("---")
@@ -74,12 +61,11 @@ def run_ema_rsi_app():
     st.sidebar.markdown("### 📅 Date Range")
     default_end = dt.date.today()
     default_start = default_end - timedelta(days=30)
-    
     start_date = st.sidebar.date_input("Start Date", value=default_start)
     end_date = st.sidebar.date_input("End Date", value=default_end)
 
     # -------------------------------------------------------------
-    # 🔑 Token Retrieval (Silent & Secure)
+    # 🔑 Token Retrieval
     # -------------------------------------------------------------
     if "UPSTOX_ACCESS_TOKEN" in st.secrets:
         upstox_token = st.secrets["UPSTOX_ACCESS_TOKEN"]
@@ -107,7 +93,6 @@ def run_ema_rsi_app():
             if not symbols_selected:
                 st.error("❌ Please select at least one index to scan.")
                 st.stop()
-
             if not upstox_token:
                 st.error("❌ Upstox Access Token is missing from Streamlit secrets.")
                 st.stop()
@@ -119,15 +104,20 @@ def run_ema_rsi_app():
                 progress_bar.progress(current / total)
                 status_text.text(f"[{current}/{total}] {message}")
 
-            with st.spinner(f"Running Pure Price Retracement Strategy ({ltf_choice})..."):
-                trades_df = process_ema_rsi_guided_strategy(
-                    symbols=symbols_selected, start_date=start_date, end_date=end_date,
-                    upstox_token=upstox_token, sell_offset=sell_offset, buy_offset=buy_offset,
-                    require_color=require_color, require_expansion=require_expansion,
-                    require_rsi_sma=require_rsi_sma, require_1h_sma=require_1h_sma,
-                    require_adx=require_adx, adx_threshold=adx_threshold, ltf=ltf_choice,
-                    max_concurrent_trades=max_concurrent, progress_callback=update_progress, log_func=log_message
-                )
+            try:
+                with st.spinner(f"Running Pure Price Retracement Strategy ({ltf_choice})..."):
+                    trades_df = process_ema_rsi_guided_strategy(
+                        symbols=symbols_selected, start_date=start_date, end_date=end_date,
+                        upstox_token=upstox_token, sell_offset=sell_offset, buy_offset=buy_offset,
+                        require_color=require_color, require_expansion=require_expansion,
+                        require_rsi_sma=require_rsi_sma, require_1h_sma=require_1h_sma,
+                        require_adx=require_adx, adx_threshold=adx_threshold, ltf=ltf_choice,
+                        max_concurrent_trades=max_concurrent, progress_callback=update_progress, log_func=log_message
+                    )
+            except Exception as e:
+                st.error("🚨 CRITICAL BACKTEST EXCEPTION ENCOUNTERED:")
+                st.code(traceback.format_exc())
+                return
 
             progress_bar.empty()
             status_text.empty()
@@ -136,29 +126,15 @@ def run_ema_rsi_app():
                 st.warning("⚠️ No trades were generated for the selected parameters and date range.")
             else:
                 st.success(f"✅ Backtest completed! Found {len(trades_df)} trades.")
-                
-                # Performance Metrics
-                total_trades = len(trades_df)
-                wins = trades_df[trades_df['PnL (₹)'] > 0]
-                win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
-                total_pnl = trades_df['PnL (₹)'].sum()
-                avg_pnl = trades_df['PnL (₹)'].mean()
-
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Total Trades", f"{total_trades}")
-                col2.metric("Win Rate", f"{win_rate:.1f}%")
-                col3.metric("Total Net PnL", f"₹{total_pnl:,.2f}")
-                col4.metric("Avg PnL / Trade", f"₹{avg_pnl:,.2f}")
-                
                 st.dataframe(trades_df, use_container_width=True)
                 st.download_button(label="📥 Download Trades CSV", data=trades_df.to_csv(index=False).encode('utf-8'), file_name=f"{report_name}.csv", mime="text/csv")
 
     # ==========================================
-    # TAB 2: LIVE FORWARD SCANNER
+    # TAB 2: LIVE FORWARD SCANNER (WITH DEEP DEBUG)
     # ==========================================
     with tab2:
         st.markdown("### 📡 Real-Time Market Scanner")
-        st.caption("Fetches live Upstox data to evaluate the exact current market state for forward testing.")
+        st.caption("Fetches live Upstox data with deep debugging enabled.")
         
         if 'active_forward_trades' not in st.session_state:
             st.session_state['active_forward_trades'] = 0
@@ -178,47 +154,48 @@ def run_ema_rsi_app():
                     st.session_state['active_forward_trades'] -= 1
                     st.rerun()
 
-        # ---------------------------------------------------------
-        # 🔄 AUTO-SCANNER CONTROLS
-        # ---------------------------------------------------------
         st.markdown("---")
-        
         col_btn, col_tgl = st.columns([1, 3])
         with col_btn:
             manual_scan = st.button("📡 Scan Now")
         with col_tgl:
-            auto_scan = st.toggle("🔄 Auto-Scan (Every 60 Seconds)", value=False, help="Turn this on to automatically fetch new data every minute.")
+            auto_scan = st.toggle("🔄 Auto-Scan (Every 60 Seconds)", value=False)
         
         if st.session_state['active_forward_trades'] >= max_concurrent:
             st.error(f"🚨 **MAX CONCURRENCY REACHED ({max_concurrent}).** DO NOT ENTER NEW POSITIONS.")
         
-        # Trigger scan if button is clicked OR if auto-scan is toggled ON
         if manual_scan or auto_scan:
             if not upstox_token:
                 st.error("❌ Upstox Access Token is missing from Streamlit secrets.")
                 st.stop()
-                
-            if st.session_state['active_forward_trades'] >= max_concurrent:
-                st.warning("Scanning for educational purposes, but you are at your concurrency limit.")
             
-            with st.spinner("Fetching Live Edges..."):
+            # 🚨 DEEP DEBUG INSPECTOR EXPANDER
+            debug_expander = st.expander("🛠️ Deep Debug Console (Live Scanner Trace)", expanded=True)
+            debug_container = debug_expander.container()
+
+            def scanner_debug_log(msg):
+                debug_container.write(f"[{dt.datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+            try:
+                scanner_debug_log("Initiating live scanner API call...")
                 scan_df = run_live_scanner(
                     symbols=symbols_selected, upstox_token=upstox_token, 
                     require_color=require_color, require_expansion=require_expansion, 
                     require_rsi_sma=require_rsi_sma, require_1h_sma=require_1h_sma, 
-                    require_adx=require_adx, adx_threshold=adx_threshold, ltf=ltf_choice
+                    require_adx=require_adx, adx_threshold=adx_threshold, ltf=ltf_choice,
+                    debug_func=scanner_debug_log
                 )
-            
-            st.dataframe(scan_df, use_container_width=True)
-            
-            # Display time in IST
-            ist_time = dt.datetime.utcnow() + timedelta(hours=5, minutes=30)
-            st.caption(f"Last scanned at: {ist_time.strftime('%I:%M:%S %p')} (IST)")
-            
-            if '✅ ACTIVE SETUP DETECTED' in scan_df['Reason'].values:
-                st.success("🔔 **VALID TRADE SETUP DETECTED RIGHT NOW!** Check your Upstox terminal.")
+                scanner_debug_log(f"Scan finished successfully. Returned {len(scan_df)} symbol records.")
                 
-            # 🚨 THE AUTO-REFRESH ENGINE
+                st.dataframe(scan_df, use_container_width=True)
+                ist_time = dt.datetime.utcnow() + timedelta(hours=5, minutes=30)
+                st.caption(f"Last scanned at: {ist_time.strftime('%I:%M:%S %p')} (IST)")
+                
+            except Exception as e:
+                scanner_debug_log(f"❌ ERROR IN LIVE SCANNER: {str(e)}")
+                st.error("🚨 LIVE SCANNER EXCEPTION ENCOUNTERED:")
+                st.code(traceback.format_exc())
+
             if auto_scan:
-                time.sleep(60) # Wait 60 seconds
-                st.rerun()     # Automatically refresh the Streamlit app
+                time.sleep(60)
+                st.rerun()
