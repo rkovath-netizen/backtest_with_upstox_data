@@ -1,6 +1,7 @@
 import streamlit as st
 import datetime as dt
 import pandas as pd
+import time
 from datetime import timedelta
 from strategies.ema_vwap_retracement_rsi_guided.strategy_engine import process_ema_rsi_guided_strategy, run_live_scanner
 
@@ -177,12 +178,22 @@ def run_ema_rsi_app():
                     st.session_state['active_forward_trades'] -= 1
                     st.rerun()
 
+        # ---------------------------------------------------------
+        # 🔄 AUTO-SCANNER CONTROLS
+        # ---------------------------------------------------------
         st.markdown("---")
+        
+        col_btn, col_tgl = st.columns([1, 3])
+        with col_btn:
+            manual_scan = st.button("📡 Scan Now")
+        with col_tgl:
+            auto_scan = st.toggle("🔄 Auto-Scan (Every 60 Seconds)", value=False, help="Turn this on to automatically fetch new data every minute.")
         
         if st.session_state['active_forward_trades'] >= max_concurrent:
             st.error(f"🚨 **MAX CONCURRENCY REACHED ({max_concurrent}).** DO NOT ENTER NEW POSITIONS.")
         
-        if st.button("📡 Scan Current Market State"):
+        # Trigger scan if button is clicked OR if auto-scan is toggled ON
+        if manual_scan or auto_scan:
             if not upstox_token:
                 st.error("❌ Upstox Access Token is missing from Streamlit secrets.")
                 st.stop()
@@ -199,6 +210,12 @@ def run_ema_rsi_app():
                 )
             
             st.dataframe(scan_df, use_container_width=True)
+            st.caption(f"Last scanned at: {dt.datetime.now().strftime('%H:%M:%S')}")
             
             if '✅ ACTIVE SETUP DETECTED' in scan_df['Reason'].values:
                 st.success("🔔 **VALID TRADE SETUP DETECTED RIGHT NOW!** Check your Upstox terminal.")
+                
+            # 🚨 THE AUTO-REFRESH ENGINE
+            if auto_scan:
+                time.sleep(60) # Wait 60 seconds
+                st.rerun()     # Automatically refresh the Streamlit app
