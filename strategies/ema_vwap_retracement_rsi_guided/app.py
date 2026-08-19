@@ -130,11 +130,11 @@ def run_ema_rsi_app():
                 st.download_button(label="📥 Download Trades CSV", data=trades_df.to_csv(index=False).encode('utf-8'), file_name=f"{report_name}.csv", mime="text/csv")
 
     # ==========================================
-    # TAB 2: LIVE FORWARD SCANNER (WITH DEEP DEBUG)
+    # TAB 2: LIVE FORWARD SCANNER
     # ==========================================
     with tab2:
         st.markdown("### 📡 Real-Time Market Scanner")
-        st.caption("Fetches live Upstox data with deep debugging enabled.")
+        st.caption("Fetches live Upstox data for forward testing.")
         
         if 'active_forward_trades' not in st.session_state:
             st.session_state['active_forward_trades'] = 0
@@ -169,30 +169,23 @@ def run_ema_rsi_app():
                 st.error("❌ Upstox Access Token is missing from Streamlit secrets.")
                 st.stop()
             
-            # 🚨 DEEP DEBUG INSPECTOR EXPANDER
-            debug_expander = st.expander("🛠️ Deep Debug Console (Live Scanner Trace)", expanded=True)
-            debug_container = debug_expander.container()
-
-            def scanner_debug_log(msg):
-                debug_container.write(f"[{dt.datetime.now().strftime('%H:%M:%S')}] {msg}")
-
             try:
-                scanner_debug_log("Initiating live scanner API call...")
-                scan_df = run_live_scanner(
-                    symbols=symbols_selected, upstox_token=upstox_token, 
-                    require_color=require_color, require_expansion=require_expansion, 
-                    require_rsi_sma=require_rsi_sma, require_1h_sma=require_1h_sma, 
-                    require_adx=require_adx, adx_threshold=adx_threshold, ltf=ltf_choice,
-                    debug_func=scanner_debug_log
-                )
-                scanner_debug_log(f"Scan finished successfully. Returned {len(scan_df)} symbol records.")
+                with st.spinner("Fetching Live Edges..."):
+                    scan_df = run_live_scanner(
+                        symbols=symbols_selected, upstox_token=upstox_token, 
+                        require_color=require_color, require_expansion=require_expansion, 
+                        require_rsi_sma=require_rsi_sma, require_1h_sma=require_1h_sma, 
+                        require_adx=require_adx, adx_threshold=adx_threshold, ltf=ltf_choice
+                    )
                 
                 st.dataframe(scan_df, use_container_width=True)
                 ist_time = dt.datetime.utcnow() + timedelta(hours=5, minutes=30)
                 st.caption(f"Last scanned at: {ist_time.strftime('%I:%M:%S %p')} (IST)")
                 
+                if '✅ ACTIVE SETUP DETECTED' in scan_df['Reason'].values:
+                    st.success("🔔 **VALID TRADE SETUP DETECTED RIGHT NOW!** Check your Upstox terminal.")
+                    
             except Exception as e:
-                scanner_debug_log(f"❌ ERROR IN LIVE SCANNER: {str(e)}")
                 st.error("🚨 LIVE SCANNER EXCEPTION ENCOUNTERED:")
                 st.code(traceback.format_exc())
 
