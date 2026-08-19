@@ -210,7 +210,10 @@ def run_ema_rsi_app():
                 )
             
             st.dataframe(scan_df, use_container_width=True)
-            st.caption(f"Last scanned at: {dt.datetime.now().strftime('%H:%M:%S')}")
+            
+            # Display time in IST
+            ist_time = dt.datetime.utcnow() + timedelta(hours=5, minutes=30)
+            st.caption(f"Last scanned at: {ist_time.strftime('%I:%M:%S %p')} (IST)")
             
             if '✅ ACTIVE SETUP DETECTED' in scan_df['Reason'].values:
                 st.success("🔔 **VALID TRADE SETUP DETECTED RIGHT NOW!** Check your Upstox terminal.")
