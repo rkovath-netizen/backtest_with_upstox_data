@@ -3,7 +3,6 @@ import pandas as pd
 import pandas_ta as ta
 import datetime as dt
 from datetime import timedelta, datetime
-import traceback
 from common.market_data import fetch_upstox_intraday_candles, get_available_expiries
 from common.market_calendar import resolve_expiry
 from common.options_builder import build_spread_legs
@@ -13,109 +12,84 @@ def get_premium_at_time(df, target_time):
     return past.iloc[-1]['close'] if not past.empty else 0.0
 
 # -----------------------------------------------------------------------------------------
-# 📊 HISTORICAL BACKTEST ENGINE (R&D Sandbox)
+# 📊 HISTORICAL BACKTEST ENGINE (Fully Configurable)
 # -----------------------------------------------------------------------------------------
-def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token, sell_offset=2, buy_offset=4, 
-                                    require_color=False, require_expansion=False, require_rsi_sma=True, require_1h_sma=True, 
-                                    require_adx=True, adx_threshold=20.0, ltf="3min", max_concurrent_trades=3, 
+def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token, 
+                                    trade_mode="CREDIT_SPREAD", # NEW: 'CREDIT_SPREAD' or 'NAKED_BUY'
+                                    sell_offset=2, buy_offset=4, 
+                                    require_color=False, require_expansion=False, 
+                                    require_rsi_sma=True, require_1h_sma=True, require_adx=True, adx_threshold=20.0, 
+                                    require_high_break=False, # NEW
+                                    require_ltf_rsi=False, # NEW
+                                    dynamic_exit_ema="Trigger EMA", # NEW: 'Trigger EMA', '9 EMA', '21 EMA', '50 EMA'
+                                    use_2_candle_exit=False, # NEW
+                                    ltf="3min", max_concurrent_trades=3, 
                                     progress_callback=None, log_func=print):
     all_trades = []
     total_symbols = len(symbols)
     
     for sym_idx, symbol in enumerate(symbols):
-        log_func(f"\n========================================\n🚀 Processing {symbol} (LTF: {ltf} | Max Concurrent: {max_concurrent_trades})\n========================================")
+        log_func(f"\n========================================\n🚀 Processing {symbol} ({trade_mode})\n========================================")
         
         start_dt = datetime.combine(start_date, datetime.min.time())
         end_dt = datetime.combine(end_date, datetime.max.time())
         warmup_start = start_dt - timedelta(days=15)
         
         spot_1m = fetch_upstox_intraday_candles(symbol, warmup_start, end_dt, upstox_token, interval="1minute", log_func=log_func)
-        if spot_1m.empty:
-            continue
+        if spot_1m.empty: continue
 
-        actual_start = spot_1m['timestamp'].min().strftime('%Y-%m-%d')
-        actual_end = spot_1m['timestamp'].max().strftime('%Y-%m-%d')
-        log_func(f"📊 Resampling {symbol} SPOT (Data: {actual_start} to {actual_end}) to 1H, 15m, and {ltf}...")
-        
-        # --- 1H Data Prep ---
+        # --- Data Prep ---
         df_1h = spot_1m.set_index('timestamp').resample('1h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
         df_1h['SMA_20'] = ta.sma(df_1h['close'], length=20)
         df_1h = df_1h.reset_index()
 
-        # --- 15m Data Prep ---
         df_15m = spot_1m.set_index('timestamp').resample('15min').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
         df_15m['EMA_9'] = ta.ema(df_15m['close'], length=9)
         df_15m['EMA_21'] = ta.ema(df_15m['close'], length=21)
         df_15m['RSI_14'] = ta.rsi(df_15m['close'], length=14)
         df_15m['RSI_SMA_14'] = ta.sma(df_15m['RSI_14'], length=14)
-        
         adx_df = ta.adx(df_15m['high'], df_15m['low'], df_15m['close'], length=14)
         df_15m['ADX_14'] = adx_df['ADX_14'] if (adx_df is not None and not adx_df.empty) else 0.0
-
-        atr_15m = ta.atr(df_15m['high'], df_15m['low'], df_15m['close'], length=14)
-        df_15m['ATR_Trailing_Long'] = df_15m['close'] - (3 * atr_15m)
-        df_15m['ATR_Trailing_Short'] = df_15m['close'] + (3 * atr_15m)
         df_15m = df_15m.reset_index()
 
-        # --- LTF Data Prep ---
         df_ltf = spot_1m.set_index('timestamp').resample(ltf).agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
         df_ltf['EMA_9'] = ta.ema(df_ltf['close'], length=9)
+        df_ltf['EMA_21'] = ta.ema(df_ltf['close'], length=21) # NEW
         df_ltf['EMA_50'] = ta.ema(df_ltf['close'], length=50)
+        df_ltf['RSI_14'] = ta.rsi(df_ltf['close'], length=14) # NEW
         df_ltf['body_abs'] = abs(df_ltf['close'] - df_ltf['open'])
         df_ltf['avg_body_10'] = df_ltf['body_abs'].rolling(10).mean().shift(1)
         df_ltf = df_ltf.reset_index()
         
         entries = []
-        stats = {'total': 0, 'adx_blocked': 0, 'sensex_blocked': 0, 'trend': 0, 'retrace': 0, 'color': 0, 'expansion': 0, 'rsi': 0, 'h1': 0}
         
         # ==========================================
         # 1. ENTRY LOGIC & SCANNING
         # ==========================================
         for j in range(1, len(df_ltf) - 1):
             c_time = df_ltf.loc[j, 'timestamp']
-            
             if c_time < start_dt or c_time > end_dt: continue
-                
-            stats['total'] += 1
 
-            if symbol == "SENSEX":
-                if c_time.weekday() == 4:
-                    stats['sensex_blocked'] += 1
-                    continue
-                if c_time.time() >= dt.time(13, 0):
-                    stats['sensex_blocked'] += 1
-                    continue
+            if symbol == "SENSEX" and (c_time.weekday() == 4 or c_time.time() >= dt.time(13, 0)): continue
 
             matching_1h = df_1h[df_1h['timestamp'] <= c_time]
-            if matching_1h.empty: continue
-            curr_1h = matching_1h.iloc[-1]
-            c_1h_close, c_1h_sma20 = curr_1h['close'], curr_1h['SMA_20']
-
             matching_15m = df_15m[df_15m['timestamp'] <= c_time]
-            if matching_15m.empty: continue
+            if matching_1h.empty or matching_15m.empty: continue
+            
+            c_1h_close, c_1h_sma20 = matching_1h.iloc[-1]['close'], matching_1h.iloc[-1]['SMA_20']
             curr_15m = matching_15m.iloc[-1]
+            ema9_15, ema21_15, c_adx = curr_15m['EMA_9'], curr_15m['EMA_21'], curr_15m['ADX_14']
             
-            ema9_15, ema21_15 = curr_15m['EMA_9'], curr_15m['EMA_21']
-            c_rsi, c_rsi_sma, c_adx = curr_15m['RSI_14'], curr_15m['RSI_SMA_14'], curr_15m['ADX_14']
-            
-            if require_adx and (pd.isna(c_adx) or c_adx < adx_threshold):
-                stats['adx_blocked'] += 1
-                continue
+            if require_adx and (pd.isna(c_adx) or c_adx < adx_threshold): continue
             
             c_open, c_high, c_low, c_close = df_ltf.loc[j, 'open'], df_ltf.loc[j, 'high'], df_ltf.loc[j, 'low'], df_ltf.loc[j, 'close']
             c_ema9, c_ema50 = df_ltf.loc[j, 'EMA_9'], df_ltf.loc[j, 'EMA_50']
-            c_body, avg_body = df_ltf.loc[j, 'body_abs'], df_ltf.loc[j, 'avg_body_10']
             
             is_bullish_trend = ema9_15 > ema21_15
             is_bearish_trend = ema9_15 < ema21_15
-            
             if not (is_bullish_trend or is_bearish_trend): continue
-            stats['trend'] += 1
             
-            # --- NEW EXPLICIT BOUNCE TRACKING ---
-            bounce_9 = False
-            bounce_50 = False
-            
+            bounce_9, bounce_50 = False, False
             if is_bullish_trend:
                 if (c_low < c_ema9) and (c_close > c_ema9): bounce_9 = True
                 elif (c_low < c_ema50) and (c_close > c_ema50): bounce_50 = True
@@ -125,41 +99,42 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                 
             bullish_retracement = is_bullish_trend and (bounce_9 or bounce_50)
             bearish_retracement = is_bearish_trend and (bounce_9 or bounce_50)
-            
             if not (bullish_retracement or bearish_retracement): continue
-            stats['retrace'] += 1
             
-            # Identify which EMA triggered this setup
-            entry_basis = 'EMA_9' if bounce_9 else 'EMA_50'
+            # --- NEW: LTF RSI FILTER ---
+            if require_ltf_rsi:
+                ltf_rsi = df_ltf.loc[j, 'RSI_14']
+                if bullish_retracement and ltf_rsi < 50: continue
+                if bearish_retracement and ltf_rsi > 50: continue
             
+            # Additional Filters
             color_ok = (c_close > c_open) if (require_color and bullish_retracement) else ((c_close < c_open) if require_color else True)
-            if not color_ok: continue
-            stats['color'] += 1
-            
-            expansion_ok = (c_body > avg_body) if require_expansion else True
-            if not expansion_ok: continue
-            stats['expansion'] += 1
-            
-            rsi_ok = (c_rsi > c_rsi_sma) if (require_rsi_sma and bullish_retracement) else ((c_rsi < c_rsi_sma) if require_rsi_sma else True)
-            if not rsi_ok: continue
-            stats['rsi'] += 1
-            
+            expansion_ok = (df_ltf.loc[j, 'body_abs'] > df_ltf.loc[j, 'avg_body_10']) if require_expansion else True
+            rsi_ok = (curr_15m['RSI_14'] > curr_15m['RSI_SMA_14']) if (require_rsi_sma and bullish_retracement) else ((curr_15m['RSI_14'] < curr_15m['RSI_SMA_14']) if require_rsi_sma else True)
             h1_ok = (c_1h_close > c_1h_sma20) if (require_1h_sma and bullish_retracement) else ((c_1h_close < c_1h_sma20) if require_1h_sma else True)
-            if not h1_ok: continue
-            stats['h1'] += 1
             
-            trade_type = 'PE_SPREAD' if bullish_retracement else 'CE_SPREAD'
+            if not (color_ok and expansion_ok and rsi_ok and h1_ok): continue
             
-            # Append entry_basis to dictionary for the exit engine
+            # --- NEW: HIGH/LOW BREAK CONFIRMATION ---
+            entry_time = df_ltf.loc[j+1, 'timestamp']
+            entry_price = df_ltf.loc[j+1, 'open']
+            
+            if require_high_break:
+                if bullish_retracement:
+                    if df_ltf.loc[j+1, 'high'] > c_high: entry_price = c_high
+                    else: continue
+                elif bearish_retracement:
+                    if df_ltf.loc[j+1, 'low'] < c_low: entry_price = c_low
+                    else: continue
+
+            # Determine Trade Intent
+            trade_intent = 'BULLISH' if bullish_retracement else 'BEARISH'
+            
             entries.append({
-                'time': df_ltf.loc[j+1, 'timestamp'], 
-                'price': df_ltf.loc[j+1, 'open'], 
-                'type': trade_type, 
-                'ltf_idx': j+1,
-                'entry_basis': entry_basis
+                'time': entry_time, 'price': entry_price, 'intent': trade_intent, 
+                'ltf_idx': j+1, 'entry_basis': 'EMA_9' if bounce_9 else 'EMA_50'
             })
 
-        log_func(f"🔎 Spot Diagnostic Funnel for {symbol} ({ltf}): Bars Scanned: {stats['total']} | Passed Trend: {stats['trend']}")
         if not entries: continue
 
         # ==========================================
@@ -167,31 +142,38 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
         # ==========================================
         api_cache, chain_cache = {}, {}
         active_exits = []
-        concurrency_blocked = 0
         
         for idx, trade in enumerate(entries):
-            entry_time, entry_price = trade['time'], trade['price']
-            trade_type, start_ltf_idx = trade['type'], trade['ltf_idx']
+            entry_time, entry_price, intent = trade['time'], trade['price'], trade['intent']
             
             active_exits = [ext for ext in active_exits if ext > entry_time]
-            if len(active_exits) >= max_concurrent_trades:
-                concurrency_blocked += 1
-                continue 
-            
+            if len(active_exits) >= max_concurrent_trades: continue 
             if progress_callback: progress_callback(sym_idx + 1, total_symbols, f"[{symbol}] Processing Trade {idx+1}/{len(entries)}")
             
             trade_date = entry_time.date()
             raw_expiries = get_available_expiries(symbol, trade_date, upstox_token, log_func=lambda x: None)
-            valid_expiries = resolve_expiry(symbol, trade_date, raw_expiries, log_func=log_func)
-            
+            valid_expiries = resolve_expiry(symbol, trade_date, raw_expiries, log_func=lambda x: None)
             if not valid_expiries: continue
+            
             target_expiry = valid_expiries[0]
             if target_expiry == trade_date and len(valid_expiries) > 1: target_expiry = valid_expiries[1]
             
-            strat_name = "Bull Put Spread" if trade_type == 'PE_SPREAD' else "Bear Call Spread"
-            legs = build_spread_legs(symbol=symbol, entry_price=entry_price, strategy_type=strat_name, target_expiry_date=target_expiry, access_token=upstox_token, sell_offset=sell_offset, buy_offset=buy_offset, chain_cache=chain_cache, log_func=lambda x: None)
+            # --- STRUCTURE LEGS BASED ON TRADE MODE ---
+            legs = []
+            if trade_mode == "CREDIT_SPREAD":
+                strat_name = "Bull Put Spread" if intent == 'BULLISH' else "Bear Call Spread"
+                legs = build_spread_legs(symbol=symbol, entry_price=entry_price, strategy_type=strat_name, target_expiry_date=target_expiry, access_token=upstox_token, sell_offset=sell_offset, buy_offset=buy_offset, chain_cache=chain_cache, log_func=lambda x: None)
+            elif trade_mode == "NAKED_BUY":
+                # Trick the builder into grabbing CE options for Bullish, PE for Bearish, at ATM (0 offset)
+                strat_name = "Bear Call Spread" if intent == 'BULLISH' else "Bull Put Spread" 
+                temp_legs = build_spread_legs(symbol=symbol, entry_price=entry_price, strategy_type=strat_name, target_expiry_date=target_expiry, access_token=upstox_token, sell_offset=0, buy_offset=2, chain_cache=chain_cache, log_func=lambda x: None)
+                if len(temp_legs) > 0:
+                    leg = temp_legs[0]
+                    leg['side'] = 'B' # Force it to Buy
+                    legs = [leg]
                 
-            if len(legs) != 2: continue
+            if (trade_mode == "CREDIT_SPREAD" and len(legs) != 2) or (trade_mode == "NAKED_BUY" and len(legs) != 1): continue
+            
             trade_lot_size = legs[0]['lot_size']
             fetch_end = entry_time + timedelta(days=10)
             leg_data = []
@@ -204,84 +186,85 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                 if not df_1m_leg.empty:
                     leg_data.append({'side': leg['side'], 'df': df_1m_leg.set_index('timestamp').resample(ltf).agg({'close': 'last'}).dropna().reset_index()})
 
-            if len(leg_data) != 2: continue
+            if len(leg_data) != len(legs): continue
 
-            leg1_entry = get_premium_at_time(leg_data[0]['df'], entry_time)
-            leg2_entry = get_premium_at_time(leg_data[1]['df'], entry_time)
-            initial_net_credit = leg1_entry - leg2_entry
-            
-            if initial_net_credit < 15.0: continue
-            spread_width = abs(legs[0]['strike'] - legs[1]['strike'])
-            capital_employed = spread_width * trade_lot_size
+            # Financial Calculations Setup
+            if trade_mode == "CREDIT_SPREAD":
+                l1_entry = get_premium_at_time(leg_data[0]['df'], entry_time)
+                l2_entry = get_premium_at_time(leg_data[1]['df'], entry_time)
+                entry_value = l1_entry - l2_entry
+                if entry_value < 15.0: continue
+                capital_employed = abs(legs[0]['strike'] - legs[1]['strike']) * trade_lot_size
+                strike_pair_str = f"{legs[0]['strike']} / {legs[1]['strike']}"
+            else: # NAKED_BUY
+                entry_value = get_premium_at_time(leg_data[0]['df'], entry_time) # Debit paid
+                capital_employed = entry_value * trade_lot_size
+                strike_pair_str = f"{legs[0]['strike']} (Naked)"
 
             exit_time, exit_reason, exit_bar_step = df_ltf.iloc[-1]['timestamp'], "Data Ended", len(df_ltf) - 1
-            max_hold_time = entry_time + timedelta(days=3)
+            close_below_count, close_above_count = 0, 0
 
-            for step in range(start_ltf_idx + 1, len(df_ltf)):
+            # Exit Loop
+            for step in range(trade['ltf_idx'] + 1, len(df_ltf)):
                 curr_time = df_ltf.loc[step, 'timestamp']
                 
-                # ----------------------------------------------------
-                # 🛡️ TIME & STRUCTURAL EXITS
-                # ----------------------------------------------------
-                if curr_time > max_hold_time:
-                    exit_reason, exit_time, exit_bar_step = "Time Stop (Max 3 Days Hit)", curr_time, step
-                    break
-                if curr_time.weekday() == 0 and curr_time.time() >= dt.time(15, 27):
-                    exit_reason, exit_time, exit_bar_step = "Monday Pre-Expiry Auto Square-Off", curr_time, step
-                    break
-                if curr_time > leg_data[0]['df'].iloc[-1]['timestamp']:
-                    exit_reason, exit_time, exit_bar_step = "Contract Expired (Failsafe Exit)", leg_data[0]['df'].iloc[-1]['timestamp'], step
-                    break
-
-                # ----------------------------------------------------
-                # 🛡️ UPDATED DYNAMIC EXITS (Referencing specific EMA)
-                # ----------------------------------------------------
+                # 1. Structural Exits
+                if curr_time > entry_time + timedelta(days=3): exit_reason, exit_time, exit_bar_step = "Time Stop (Max 3 Days)", curr_time, step; break
+                if curr_time.weekday() == 0 and curr_time.time() >= dt.time(15, 27): exit_reason, exit_time, exit_bar_step = "Monday Pre-Expiry", curr_time, step; break
+                
                 curr_spot_close = df_ltf.loc[step, 'close']
-                curr_ema9, curr_ema50 = df_ltf.loc[step, 'EMA_9'], df_ltf.loc[step, 'EMA_50']
-                
-                # Fetch the specific EMA this trade was based on
-                reference_ema = curr_ema9 if trade['entry_basis'] == 'EMA_9' else curr_ema50
-                
-                if trade_type == 'PE_SPREAD' and curr_spot_close < reference_ema:
-                    exit_reason, exit_time, exit_bar_step = f"Dynamic Exit: LTF Close < {trade['entry_basis']}", curr_time, step
-                    break
-                elif trade_type == 'CE_SPREAD' and curr_spot_close > reference_ema:
-                    exit_reason, exit_time, exit_bar_step = f"Dynamic Exit: LTF Close > {trade['entry_basis']}", curr_time, step
-                    break
 
-                matching_15m = df_15m[df_15m['timestamp'] <= curr_time]
-                if not matching_15m.empty:
-                    m15_row = matching_15m.iloc[-1]
-                    if trade_type == 'PE_SPREAD' and curr_spot_close < m15_row['ATR_Trailing_Long']:
-                        exit_reason, exit_time, exit_bar_step = "15m Spot Close < ATR Trailing SL", curr_time, step
-                        break
-                    elif trade_type == 'CE_SPREAD' and curr_spot_close > m15_row['ATR_Trailing_Short']:
-                        exit_reason, exit_time, exit_bar_step = "15m Spot Close > ATR Trailing SL", curr_time, step
-                        break
+                # 2. Dynamic Exit Setup (EMA Routing)
+                if dynamic_exit_ema == "9 EMA": ref_ema = df_ltf.loc[step, 'EMA_9']
+                elif dynamic_exit_ema == "21 EMA": ref_ema = df_ltf.loc[step, 'EMA_21']
+                elif dynamic_exit_ema == "50 EMA": ref_ema = df_ltf.loc[step, 'EMA_50']
+                else: ref_ema = df_ltf.loc[step, 'EMA_9'] if trade['entry_basis'] == 'EMA_9' else df_ltf.loc[step, 'EMA_50']
 
-                # ----------------------------------------------------
-                # 💰 PREMIUM DECAY/APPRECIATION EXITS
-                # ----------------------------------------------------
-                l1_curr, l2_curr = get_premium_at_time(leg_data[0]['df'], curr_time), get_premium_at_time(leg_data[1]['df'], curr_time)
-                current_pnl_per_qty = initial_net_credit - (l1_curr - l2_curr)
+                # 3. Apply 2-Candle Rule Logic
+                if curr_spot_close < ref_ema:
+                    close_below_count += 1
+                    close_above_count = 0
+                elif curr_spot_close > ref_ema:
+                    close_above_count += 1
+                    close_below_count = 0
+                else:
+                    close_below_count = 0; close_above_count = 0
+
+                threshold = 2 if use_2_candle_exit else 1
                 
-                if current_pnl_per_qty >= (0.50 * initial_net_credit):
-                    exit_reason, exit_time, exit_bar_step = "Target Hit (50% Premium Decay)", curr_time, step
-                    break
-                elif current_pnl_per_qty <= (-0.60 * initial_net_credit):
-                    exit_reason, exit_time, exit_bar_step = "SL Hit (60% Premium Appreciation)", curr_time, step
-                    break
+                if intent == 'BULLISH' and close_below_count >= threshold:
+                    exit_reason, exit_time, exit_bar_step = f"Dynamic Exit (< {dynamic_exit_ema})", curr_time, step; break
+                elif intent == 'BEARISH' and close_above_count >= threshold:
+                    exit_reason, exit_time, exit_bar_step = f"Dynamic Exit (> {dynamic_exit_ema})", curr_time, step; break
 
-            l1_final, l2_final = get_premium_at_time(leg_data[0]['df'], exit_time), get_premium_at_time(leg_data[1]['df'], exit_time)
-            exit_pnl_abs = (initial_net_credit - (l1_final - l2_final)) * trade_lot_size
+                # 4. Premium Exits (Spread vs Naked)
+                if trade_mode == "CREDIT_SPREAD":
+                    l1_curr = get_premium_at_time(leg_data[0]['df'], curr_time)
+                    l2_curr = get_premium_at_time(leg_data[1]['df'], curr_time)
+                    current_pnl_per_qty = entry_value - (l1_curr - l2_curr)
+                    if current_pnl_per_qty >= (0.50 * entry_value): exit_reason, exit_time, exit_bar_step = "Target Hit (50% Decay)", curr_time, step; break
+                    elif current_pnl_per_qty <= (-0.60 * entry_value): exit_reason, exit_time, exit_bar_step = "SL Hit (60% Appreciation)", curr_time, step; break
+                else: # NAKED_BUY
+                    l1_curr = get_premium_at_time(leg_data[0]['df'], curr_time)
+                    current_pnl_per_qty = l1_curr - entry_value # Buy low, sell high
+                    if current_pnl_per_qty >= (1.00 * entry_value): exit_reason, exit_time, exit_bar_step = "Target Hit (100% ROI)", curr_time, step; break
+                    elif current_pnl_per_qty <= (-0.50 * entry_value): exit_reason, exit_time, exit_bar_step = "SL Hit (-50% Premium)", curr_time, step; break
+
+            # Final Settlement
+            if trade_mode == "CREDIT_SPREAD":
+                l1_final = get_premium_at_time(leg_data[0]['df'], exit_time)
+                l2_final = get_premium_at_time(leg_data[1]['df'], exit_time)
+                exit_pnl_abs = (entry_value - (l1_final - l2_final)) * trade_lot_size
+            else:
+                l1_final = get_premium_at_time(leg_data[0]['df'], exit_time)
+                exit_pnl_abs = (l1_final - entry_value) * trade_lot_size
 
             all_trades.append({
-                'Symbol': symbol, 'Contract': f"{symbol} SPOT", 'Type': trade_type,
-                'Entry Basis': trade['entry_basis'], # Added to final output for UI tracking
+                'Symbol': symbol, 'Mode': trade_mode, 'Intent': intent, 'Entry Basis': trade['entry_basis'],
                 'Entry Time': entry_time.strftime("%Y-%m-%d %H:%M:%S"), 'Exit Time': exit_time.strftime("%Y-%m-%d %H:%M:%S"),
-                'Duration': str(exit_time - entry_time), 'Bars in Trade': exit_bar_step - start_ltf_idx,
-                'Strike Pair': f"{legs[0]['strike']} / {legs[1]['strike']}", 'Lot Size': trade_lot_size,
-                'Net Credit (₹)': round(initial_net_credit, 2), 'Capital Employed (₹)': round(capital_employed, 2),
+                'Duration': str(exit_time - entry_time), 'Bars in Trade': exit_bar_step - trade['ltf_idx'],
+                'Strike Pair': strike_pair_str, 'Lot Size': trade_lot_size,
+                'Premium Init (₹)': round(entry_value, 2), 'Capital Employed (₹)': round(capital_employed, 2),
                 'Exit Reason': exit_reason, 'PnL (₹)': round(exit_pnl_abs, 2),
                 'PnL (%)': round((exit_pnl_abs / capital_employed * 100) if capital_employed > 0 else 0.0, 2)
             })
