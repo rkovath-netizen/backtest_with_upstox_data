@@ -241,7 +241,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
 # -----------------------------------------------------------------------------------------
 def run_live_scanner(symbols, upstox_token, require_color=False, require_expansion=False, 
                      require_rsi_sma=True, require_1h_sma=True, require_adx=True, 
-                     adx_threshold=20.0, ltf="3min"):
+                     adx_threshold=20.0, ltf="3min", debug_func=print):
     
     scan_results = []
     
@@ -250,7 +250,8 @@ def run_live_scanner(symbols, upstox_token, require_color=False, require_expansi
     warmup_start = end_dt - timedelta(days=15) 
 
     for symbol in symbols:
-        spot_1m = fetch_upstox_intraday_candles(symbol, warmup_start, end_dt, upstox_token, interval="1minute", log_func=lambda x: None)
+        debug_func(f"Fetching live data for {symbol}...")
+        spot_1m = fetch_upstox_intraday_candles(symbol, warmup_start, end_dt, upstox_token, interval="1minute", log_func=debug_func)
         if spot_1m.empty:
             scan_results.append({'Symbol': symbol, 'Time': 'ERROR', 'LTP': 0.0, '15m Trend': 'EMPTY', '15m ADX': 0.0, 'Signal': 'ERROR', 'Reason': 'No data returned'})
             continue
