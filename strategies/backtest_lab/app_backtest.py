@@ -4,7 +4,8 @@ import pandas as pd
 import time
 import traceback
 from datetime import timedelta
-from strategies.ema_vwap_retracement_rsi_guided.strategy_engine import process_ema_rsi_guided_strategy, run_live_scanner
+#from strategies.ema_vwap_retracement_rsi_guided.strategy_engine import process_ema_rsi_guided_strategy, run_live_scanner
+from strategies.backtest_lab.strategy_engine_backtest import process_ema_rsi_guided_strategy
 
 def run_ema_rsi_app():
     st.title("🎯 Pure Price Retracement Engine")
