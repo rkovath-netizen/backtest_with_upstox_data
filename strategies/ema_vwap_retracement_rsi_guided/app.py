@@ -116,29 +116,25 @@ def run_ema_rsi_app():
                 st.download_button(label="📥 Download Trades CSV", data=trades_df.to_csv(index=False).encode('utf-8'), file_name=f"{report_name}.csv", mime="text/csv")
 
     # ==========================================
-    # TAB 2: LIVE FORWARD SCANNER
+    # TAB 2: LIVE FORWARD SCANNER (PAPER TRADING)
     # ==========================================
     with tab2:
-        st.markdown("### 📡 Real-Time Market Scanner")
-        st.caption("Fetches live Upstox data for forward testing.")
+        st.markdown("### 📡 Real-Time Market Scanner & Virtual Portfolio")
+        st.caption("Auto-captures live setups, builds the option spread, and tracks Notional PnL.")
         
-        if 'active_forward_trades' not in st.session_state:
-            st.session_state['active_forward_trades'] = 0
+        # 🚨 Initialize the Virtual Portfolio State
+        if 'paper_trades' not in st.session_state:
+            st.session_state.paper_trades = {}
 
         col1, col2, col3 = st.columns([1, 1, 2])
         col1.metric("Max Allowed Trades", max_concurrent)
-        col2.metric("Active Open Trades", st.session_state['active_forward_trades'])
+        col2.metric("Active Virtual Trades", len(st.session_state.paper_trades))
         
         with col3:
-            st.write("Virtual Trade Manager")
-            c1, c2 = st.columns(2)
-            if c1.button("➕ Open a Trade"):
-                st.session_state['active_forward_trades'] += 1
+            st.write("Virtual Portfolio Manager")
+            if st.button("🗑️ Square-Off / Reset All Virtual Trades"):
+                st.session_state.paper_trades = {}
                 st.rerun()
-            if c2.button("➖ Close a Trade"):
-                if st.session_state['active_forward_trades'] > 0:
-                    st.session_state['active_forward_trades'] -= 1
-                    st.rerun()
 
         st.markdown("---")
         col_btn, col_tgl = st.columns([1, 3])
@@ -147,15 +143,14 @@ def run_ema_rsi_app():
         with col_tgl:
             auto_scan = st.toggle("🔄 Auto-Scan (Every 60 Seconds)", value=False)
         
-        if st.session_state['active_forward_trades'] >= max_concurrent:
-            st.error(f"🚨 **MAX CONCURRENCY REACHED ({max_concurrent}).** DO NOT ENTER NEW POSITIONS.")
+        if len(st.session_state.paper_trades) >= (max_concurrent * len(symbols_selected)):
+            st.warning("⚠️ Max Concurrency Reached. Scanner will track open trades but block new entries.")
         
         if manual_scan or auto_scan:
             if not upstox_token:
                 st.error("❌ Upstox Access Token is missing from Streamlit secrets.")
                 st.stop()
             
-            # 🚨 THE MISSING UI CONSOLE IS RESTORED HERE 🚨
             debug_expander = st.expander("🛠️ Deep Debug Console (API Traces)", expanded=True)
             debug_container = debug_expander.container()
 
@@ -163,21 +158,23 @@ def run_ema_rsi_app():
                 debug_container.write(msg)
 
             try:
-                with st.spinner("Fetching Live Edges..."):
+                with st.spinner("Fetching Live Edges & Premiums..."):
                     scan_df = run_live_scanner(
                         symbols=symbols_selected, upstox_token=upstox_token, 
                         require_color=require_color, require_expansion=require_expansion, 
                         require_rsi_sma=require_rsi_sma, require_1h_sma=require_1h_sma, 
                         require_adx=require_adx, adx_threshold=adx_threshold, ltf=ltf_choice,
-                        debug_func=scanner_debug_log  # Passing the UI log function to the backend engine
+                        sell_offset=sell_offset, buy_offset=buy_offset,
+                        paper_trades=st.session_state.paper_trades, # Passing the state tracker
+                        debug_func=scanner_debug_log
                     )
                 
                 st.dataframe(scan_df, use_container_width=True)
                 ist_time = dt.datetime.utcnow() + timedelta(hours=5, minutes=30)
                 st.caption(f"Last scanned at: {ist_time.strftime('%I:%M:%S %p')} (IST)")
                 
-                if '✅ ACTIVE SETUP DETECTED' in scan_df['Reason'].values:
-                    st.success("🔔 **VALID TRADE SETUP DETECTED RIGHT NOW!** Check your Upstox terminal.")
+                if '🟢 ACTIVE POSITION' in scan_df['Signal / Reason'].values:
+                    st.success("🔔 **VIRTUAL PORTFOLIO ACTIVE!** Tracking Notional PnL above.")
                     
             except Exception as e:
                 st.error("🚨 LIVE SCANNER EXCEPTION ENCOUNTERED:")
