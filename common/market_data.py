@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 UPSTOX_INSTRUMENT_URL = "https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz"
 UPSTOX_HISTORICAL_URL = "https://api.upstox.com/v2/historical-candle/{instrument_key}/{unit}/{to_date}/{from_date}"
 UPSTOX_EXPIRED_HISTORICAL_URL = "https://api.upstox.com/v2/expired-instruments/historical-candle/{instrument_key}/{unit}/{to_date}/{from_date}"
+# Live Intraday Endpoint
+UPSTOX_INTRADAY_URL = "https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/{unit}" 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_instrument_df():
@@ -76,25 +78,57 @@ def fetch_upstox_intraday_candles(symbol_or_key, start_dt, end_dt, access_token,
     headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
     base_url = UPSTOX_EXPIRED_HISTORICAL_URL if is_expired else UPSTOX_HISTORICAL_URL
 
+    log_func(f"🔍 [DATA DEBUG] Fetching {symbol_or_key} from {start_dt.date()} to {end_dt.date()}")
+
+    # 1. Fetch from Historical Endpoint
     while chunk_start < end_dt:
         chunk_end = min(chunk_start + timedelta(days=20), end_dt)
         url = base_url.format(instrument_key=safe_key, unit=interval, to_date=chunk_end.strftime("%Y-%m-%d"), from_date=chunk_start.strftime("%Y-%m-%d"))
+        log_func(f"   🌐 [DATA DEBUG] Hitting Historical API: {url}")
+        
         try:
             time.sleep(0.3) 
             res = requests.get(url, headers=headers, timeout=10)
             if res.status_code == 200:
                 candles = res.json().get("data", {}).get("candles", [])
-                if candles: all_candles.extend(candles)
-        except Exception: pass
+                if candles:
+                    log_func(f"   ✅ [DATA DEBUG] Historical API returned {len(candles)} candles. Latest timestamp received: {candles[0][0]}")
+                    all_candles.extend(candles)
+            else:
+                log_func(f"   ❌ [DATA DEBUG] Historical API Error: {res.status_code} - {res.text}")
+        except Exception as e: 
+            log_func(f"   ❌ [DATA DEBUG] Historical API Exception: {str(e)}")
         chunk_start = chunk_end + timedelta(days=1)
+
+    # 2. Fetch from Intraday Endpoint (Only if requested end_dt includes today)
+    if end_dt.date() == current_date.date() and not is_expired:
+        intraday_url = UPSTOX_INTRADAY_URL.format(instrument_key=safe_key, unit=interval)
+        log_func(f"   🌐 [DATA DEBUG] Hitting Intraday API for today's live data: {intraday_url}")
+        
+        try:
+            time.sleep(0.3)
+            res = requests.get(intraday_url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                candles = res.json().get("data", {}).get("candles", [])
+                if candles:
+                    log_func(f"   ✅ [DATA DEBUG] Intraday API returned {len(candles)} candles. Latest timestamp received: {candles[0][0]}")
+                    all_candles.extend(candles)
+                else:
+                    log_func(f"   ⚠️ [DATA DEBUG] Intraday API returned 0 candles.")
+            else:
+                log_func(f"   ❌ [DATA DEBUG] Intraday API Error: {res.status_code} - {res.text}")
+        except Exception as e:
+            log_func(f"   ❌ [DATA DEBUG] Intraday API Exception: {str(e)}")
 
     if not all_candles: return pd.DataFrame()
     df = pd.DataFrame(all_candles, columns=["timestamp", "open", "high", "low", "close", "volume", "oi"])
     df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_convert(pytz.timezone("Asia/Kolkata")).dt.tz_localize(None)
-    return df.drop_duplicates(subset=['timestamp']).sort_values("timestamp").reset_index(drop=True)
+    
+    final_df = df.drop_duplicates(subset=['timestamp']).sort_values("timestamp").reset_index(drop=True)
+    log_func(f"   🏁 [DATA DEBUG] Final merged dataframe has {len(final_df)} unique rows ending at {final_df['timestamp'].iloc[-1]}")
+    return final_df
 
 def get_available_expiries(symbol, target_date, access_token, log_func=print):
-    """Pure Data Layer: Only fetches what exists in CSV and API. No math logic."""
     df_inst = get_instrument_df()
     if df_inst.empty: return []
     
@@ -105,7 +139,6 @@ def get_available_expiries(symbol, target_date, access_token, log_func=print):
     spot_sym = symbol.upper()
     if spot_sym == 'NIFTY': spot_sym = 'NIFTY 50'
     elif spot_sym == 'BANKNIFTY': spot_sym = 'NIFTY BANK'
-    #elif spot_sym == 'SENSEX': spot_sym = 'BSX'
     
     valid_ex = ['NSE_FO', 'BSE_FO', 'MCX_FO']
     
@@ -129,7 +162,6 @@ def get_available_expiries(symbol, target_date, access_token, log_func=print):
     return [d for d in all_expiries if d >= target_date]
 
 def get_target_option_chain(symbol, target_expiry, access_token, chain_cache=None, log_func=print):
-    """Pure Data Layer: Fetches the raw chain for a specific date."""
     df_inst = get_instrument_df()
     if df_inst.empty: return pd.DataFrame(), False
     
@@ -144,7 +176,6 @@ def get_target_option_chain(symbol, target_expiry, access_token, chain_cache=Non
     
     spot_sym = symbol.upper()
     if spot_sym == 'NIFTY': spot_sym = 'NIFTY 50'
-    #elif spot_sym == 'SENSEX': spot_sym = 'BSX'
     
     is_expired = target_expiry < current_date
     
@@ -171,7 +202,6 @@ def get_target_option_chain(symbol, target_expiry, access_token, chain_cache=Non
         else:
             chain_df = df_inst[(df_inst['exchange'].isin(['NSE_FO', 'BSE_FO'])) & (df_inst['tradingsymbol'].astype(str).str.upper().str.startswith(spot_sym)) & (pd.to_datetime(df_inst['expiry']).dt.date == target_expiry)].copy()
         
-        # Fallback if contract is in Limbo but date is technically not historical yet
         if chain_df.empty:
             chain_df = fetch_expired(target_expiry)
             if not chain_df.empty: is_expired = True
