@@ -23,17 +23,10 @@ def run_ema_rsi_app():
         default=["NIFTY", "SENSEX"]
     )
 
-    # ⏱️ Execution Timeframe (LTF)
     st.sidebar.markdown("---")
     st.sidebar.markdown("### ⏱️ Timeframe Settings")
-    ltf_choice = st.sidebar.selectbox(
-        "Entry Timeframe (LTF)",
-        options=["3min", "5min", "1min", "15min"],
-        index=0,
-        help="Select the timeframe used for EMA 50 touch detection and trailing stop management."
-    )
+    ltf_choice = st.sidebar.selectbox("Entry Timeframe (LTF)", options=["3min", "5min", "1min", "15min"], index=0)
 
-    # 🚦 Entry Conditions
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🚦 Entry Conditions")
     require_color = st.sidebar.checkbox("Require Trend Candle Color", value=False)
@@ -41,22 +34,18 @@ def run_ema_rsi_app():
     require_rsi_sma = st.sidebar.checkbox("Require 15m RSI > RSI SMA", value=True)
     require_1h_sma = st.sidebar.checkbox("Require 1h Close > SMA 20", value=True)
 
-    # 🚨 ADX Trend Strength Filter
     require_adx = st.sidebar.checkbox("Require 15m ADX Filter", value=True)
     adx_threshold = st.sidebar.number_input("Min 15m ADX Threshold", min_value=10.0, max_value=50.0, value=20.0, step=1.0)
 
-    # 🛡️ Risk Management (Concurrency)
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🛡️ Risk Management")
     max_concurrent = st.sidebar.number_input("Max Concurrent Trades (Per Symbol)", min_value=1, max_value=10, value=3, step=1)
 
-    # 🎯 Strike Configuration
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🎯 Strike Configuration")
     sell_offset = st.sidebar.number_input("Sell Leg OTM Offset", min_value=0, max_value=10, value=0, step=1)
     buy_offset = st.sidebar.number_input("Buy Hedge OTM Offset", min_value=1, max_value=15, value=2, step=1)
 
-    # 📅 Date Range
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 📅 Date Range")
     default_end = dt.date.today()
@@ -64,9 +53,6 @@ def run_ema_rsi_app():
     start_date = st.sidebar.date_input("Start Date", value=default_start)
     end_date = st.sidebar.date_input("End Date", value=default_end)
 
-    # -------------------------------------------------------------
-    # 🔑 Token Retrieval
-    # -------------------------------------------------------------
     if "UPSTOX_ACCESS_TOKEN" in st.secrets:
         upstox_token = st.secrets["UPSTOX_ACCESS_TOKEN"]
     elif "UPSTOX_TOKEN" in st.secrets:
@@ -169,13 +155,21 @@ def run_ema_rsi_app():
                 st.error("❌ Upstox Access Token is missing from Streamlit secrets.")
                 st.stop()
             
+            # 🚨 THE MISSING UI CONSOLE IS RESTORED HERE 🚨
+            debug_expander = st.expander("🛠️ Deep Debug Console (API Traces)", expanded=True)
+            debug_container = debug_expander.container()
+
+            def scanner_debug_log(msg):
+                debug_container.write(msg)
+
             try:
                 with st.spinner("Fetching Live Edges..."):
                     scan_df = run_live_scanner(
                         symbols=symbols_selected, upstox_token=upstox_token, 
                         require_color=require_color, require_expansion=require_expansion, 
                         require_rsi_sma=require_rsi_sma, require_1h_sma=require_1h_sma, 
-                        require_adx=require_adx, adx_threshold=adx_threshold, ltf=ltf_choice
+                        require_adx=require_adx, adx_threshold=adx_threshold, ltf=ltf_choice,
+                        debug_func=scanner_debug_log  # Passing the UI log function to the backend engine
                     )
                 
                 st.dataframe(scan_df, use_container_width=True)
