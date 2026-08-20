@@ -122,7 +122,6 @@ def run_ema_rsi_app():
         st.markdown("### 📡 Real-Time Market Scanner & Virtual Portfolio")
         st.caption("Auto-captures live setups, builds the option spread, and tracks Notional PnL.")
         
-        # 🚨 Initialize the Virtual Portfolio State
         if 'paper_trades' not in st.session_state:
             st.session_state.paper_trades = {}
 
@@ -165,7 +164,8 @@ def run_ema_rsi_app():
                         require_rsi_sma=require_rsi_sma, require_1h_sma=require_1h_sma, 
                         require_adx=require_adx, adx_threshold=adx_threshold, ltf=ltf_choice,
                         sell_offset=sell_offset, buy_offset=buy_offset,
-                        paper_trades=st.session_state.paper_trades, # Passing the state tracker
+                        paper_trades=st.session_state.paper_trades,
+                        report_name=report_name, # 🚨 Passed Report Name for CSV Logging
                         debug_func=scanner_debug_log
                     )
                 
