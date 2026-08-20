@@ -16,7 +16,6 @@ def run_ema_rsi_app():
     # ==========================================
     # Fetch token directly from Streamlit Secrets
     try:
-        # Note: Change "UPSTOX_TOKEN" to whatever key you used in your secrets file
         upstox_token = st.secrets["UPSTOX_TOKEN"] 
     except KeyError:
         st.error("⚠️ UPSTOX_TOKEN not found in Streamlit secrets. Please add it to your app's settings.")
@@ -31,9 +30,20 @@ def run_ema_rsi_app():
     end_date = st.sidebar.date_input("End Date", today)
     start_date = st.sidebar.date_input("Start Date", today - timedelta(days=30))
     
-    default_symbols = "NIFTY, BANKNIFTY"
-    symbols_input = st.sidebar.text_input("Symbols (comma separated)", default_symbols)
-    symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
+    # Multi-select dropdown for clean symbol selection
+    available_symbols = [
+        "NIFTY", 
+        "SENSEX", 
+        "BANKNIFTY", 
+        "CRUDEOILM", 
+        "NATGASMINI"
+    ]
+    
+    symbols = st.sidebar.multiselect(
+        "Select Symbols for Backtest",
+        options=available_symbols,
+        default=["NIFTY", "SENSEX"]
+    )
 
     st.sidebar.header("2. Strategy Parameters")
     ltf = st.sidebar.selectbox("Lower Timeframe (LTF)", ["1min", "3min", "5min", "15min"], index=1)
@@ -54,7 +64,7 @@ def run_ema_rsi_app():
     # ==========================================
     if st.button("🚀 Run Historical Backtest", use_container_width=True):
         if not symbols:
-            st.error("Please enter at least one symbol.")
+            st.error("Please select at least one symbol.")
             return
             
         st.info(f"Starting backtest from {start_date} to {end_date}...")
