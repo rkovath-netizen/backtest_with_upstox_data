@@ -268,10 +268,16 @@ def run_live_scanner(symbols, upstox_token, require_color=False, require_expansi
     today_start = end_dt.replace(hour=9, minute=15, second=0, microsecond=0)
 
     # ----------------------------------------------------
-    # 📝 CSV LOGGING HELPER
+    # 📝 CSV LOGGING HELPER (ROUTES TO dataoutput FOLDER)
     # ----------------------------------------------------
     def log_virtual_trade(action, sym, strat, spot, premium, leg1, leg2, lot, pnl, reason):
-        filename = f"{report_name}_live_trades_{ist_time.strftime('%Y-%m-%d')}.csv"
+        # 🚨 Ensure target folder exists 
+        output_dir = "dataoutput"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Build file path inside dataoutput folder
+        filename = os.path.join(output_dir, f"{report_name}_live_trades_{ist_time.strftime('%Y-%m-%d')}.csv")
+        
         log_data = {
             'Timestamp (IST)': ist_time.strftime('%Y-%m-%d %H:%M:%S'),
             'Action': action,
