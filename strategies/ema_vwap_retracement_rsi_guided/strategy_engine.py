@@ -2,6 +2,7 @@ import pandas as pd
 import pandas_ta as ta
 import datetime as dt
 from datetime import timedelta, datetime
+import traceback
 from common.market_data import fetch_upstox_intraday_candles, get_available_expiries
 from common.market_calendar import resolve_expiry
 from common.options_builder import build_spread_legs
@@ -35,12 +36,10 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
         actual_end = spot_1m['timestamp'].max().strftime('%Y-%m-%d')
         log_func(f"📊 Resampling {symbol} SPOT (Data: {actual_start} to {actual_end}) to 1H, 15m, and {ltf}...")
         
-        # 1H Timeframe
         df_1h = spot_1m.set_index('timestamp').resample('1h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
         df_1h['SMA_20'] = ta.sma(df_1h['close'], length=20)
         df_1h = df_1h.reset_index()
 
-        # 15m Timeframe
         df_15m = spot_1m.set_index('timestamp').resample('15min').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
         df_15m['EMA_9'] = ta.ema(df_15m['close'], length=9)
         df_15m['EMA_21'] = ta.ema(df_15m['close'], length=21)
@@ -55,7 +54,6 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
         df_15m['ATR_Trailing_Short'] = df_15m['close'] + (3 * atr_15m)
         df_15m = df_15m.reset_index()
 
-        # Dynamic Lower Timeframe (LTF)
         df_ltf = spot_1m.set_index('timestamp').resample(ltf).agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
         df_ltf['EMA_9'] = ta.ema(df_ltf['close'], length=9)
         df_ltf['EMA_50'] = ta.ema(df_ltf['close'], length=50)
@@ -84,18 +82,14 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             matching_1h = df_1h[df_1h['timestamp'] <= c_time]
             if matching_1h.empty: continue
             curr_1h = matching_1h.iloc[-1]
-            c_1h_close = curr_1h['close']
-            c_1h_sma20 = curr_1h['SMA_20']
+            c_1h_close, c_1h_sma20 = curr_1h['close'], curr_1h['SMA_20']
 
             matching_15m = df_15m[df_15m['timestamp'] <= c_time]
             if matching_15m.empty: continue
             curr_15m = matching_15m.iloc[-1]
             
-            ema9_15 = curr_15m['EMA_9']
-            ema21_15 = curr_15m['EMA_21']
-            c_rsi = curr_15m['RSI_14']
-            c_rsi_sma = curr_15m['RSI_SMA_14']
-            c_adx = curr_15m['ADX_14']
+            ema9_15, ema21_15 = curr_15m['EMA_9'], curr_15m['EMA_21']
+            c_rsi, c_rsi_sma, c_adx = curr_15m['RSI_14'], curr_15m['RSI_SMA_14'], curr_15m['ADX_14']
             
             if require_adx and (pd.isna(c_adx) or c_adx < adx_threshold):
                 stats['adx_blocked'] += 1
@@ -117,8 +111,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             if not (bullish_retracement or bearish_retracement): continue
             stats['retrace'] += 1
             
-            color_ok = True
-            if require_color: color_ok = (c_close > c_open) if bullish_retracement else (c_close < c_open)
+            color_ok = (c_close > c_open) if (require_color and bullish_retracement) else ((c_close < c_open) if require_color else True)
             if not color_ok: continue
             stats['color'] += 1
             
@@ -126,24 +119,18 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             if not expansion_ok: continue
             stats['expansion'] += 1
             
-            rsi_ok = True
-            if require_rsi_sma: rsi_ok = (c_rsi > c_rsi_sma) if bullish_retracement else (c_rsi < c_rsi_sma)
+            rsi_ok = (c_rsi > c_rsi_sma) if (require_rsi_sma and bullish_retracement) else ((c_rsi < c_rsi_sma) if require_rsi_sma else True)
             if not rsi_ok: continue
             stats['rsi'] += 1
             
-            h1_ok = True
-            if require_1h_sma: h1_ok = (c_1h_close > c_1h_sma20) if bullish_retracement else (c_1h_close < c_1h_sma20)
+            h1_ok = (c_1h_close > c_1h_sma20) if (require_1h_sma and bullish_retracement) else ((c_1h_close < c_1h_sma20) if require_1h_sma else True)
             if not h1_ok: continue
             stats['h1'] += 1
             
             trade_type = 'PE_SPREAD' if bullish_retracement else 'CE_SPREAD'
             entries.append({'time': df_ltf.loc[j+1, 'timestamp'], 'price': df_ltf.loc[j+1, 'open'], 'type': trade_type, 'ltf_idx': j+1})
 
-        log_func(f"🔎 Spot Diagnostic Funnel for {symbol} ({ltf}):")
-        log_func(f"   Bars Scanned: {stats['total']} | Blocked by ADX (<{adx_threshold}): {stats['adx_blocked']}")
-        if symbol == "SENSEX": log_func(f"   Blocked by SENSEX Risk Filters: {stats['sensex_blocked']}")
-        log_func(f"   Passed Trend: {stats['trend']} | Passed Retrace: {stats['retrace']}")
-        
+        log_func(f"🔎 Spot Diagnostic Funnel for {symbol} ({ltf}): Bars Scanned: {stats['total']} | Passed Trend: {stats['trend']}")
         if not entries: continue
 
         api_cache, chain_cache = {}, {}
@@ -154,7 +141,6 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             entry_time, entry_price = trade['time'], trade['price']
             trade_type, start_ltf_idx = trade['type'], trade['ltf_idx']
             
-            # Concurrency Control
             active_exits = [ext for ext in active_exits if ext > entry_time]
             if len(active_exits) >= max_concurrent_trades:
                 concurrency_blocked += 1
@@ -248,8 +234,6 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             })
             active_exits.append(exit_time)
 
-        if concurrency_blocked > 0: log_func(f"   🛡️ Blocked by Max Concurrency Limit ({max_concurrent_trades}): {concurrency_blocked} trades skipped.")
-
     return pd.DataFrame(all_trades)
 
 # -----------------------------------------------------------------------------------------
@@ -260,23 +244,15 @@ def run_live_scanner(symbols, upstox_token, require_color=False, require_expansi
                      adx_threshold=20.0, ltf="3min"):
     
     scan_results = []
-    end_dt = datetime.now()
+    
+    # 🚨 FIX: Force Streamlit's UTC server to fetch data up to the current Indian Standard Time
+    end_dt = datetime.utcnow() + timedelta(hours=5, minutes=30)
     warmup_start = end_dt - timedelta(days=15) 
 
     for symbol in symbols:
-        status, signal, c_time = "Scanning...", "NONE", end_dt
-        
-        if symbol == "SENSEX":
-            if c_time.weekday() == 4:
-                scan_results.append({'Symbol': symbol, 'Time': c_time.strftime('%H:%M:%S'), 'Signal': 'BLOCKED', 'Reason': 'Friday Premium Trap Block'})
-                continue
-            if c_time.time() >= dt.time(13, 0):
-                scan_results.append({'Symbol': symbol, 'Time': c_time.strftime('%H:%M:%S'), 'Signal': 'BLOCKED', 'Reason': 'Afternoon Trap Block (>1:00 PM)'})
-                continue
-
         spot_1m = fetch_upstox_intraday_candles(symbol, warmup_start, end_dt, upstox_token, interval="1minute", log_func=lambda x: None)
         if spot_1m.empty:
-            scan_results.append({'Symbol': symbol, 'Time': 'ERROR', 'Signal': 'ERROR', 'Reason': 'No data fetched'})
+            scan_results.append({'Symbol': symbol, 'Time': 'ERROR', 'LTP': 0.0, '15m Trend': 'EMPTY', '15m ADX': 0.0, 'Signal': 'ERROR', 'Reason': 'No data returned'})
             continue
 
         df_1h = spot_1m.set_index('timestamp').resample('1h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
@@ -300,16 +276,30 @@ def run_live_scanner(symbols, upstox_token, require_color=False, require_expansi
         if len(df_ltf) < 2: continue
         curr_ltf, last_time = df_ltf.iloc[-2], df_ltf.index[-2]
         
+        status, signal = "Awaiting Retracement", "NONE"
+        if symbol == "SENSEX":
+            if last_time.weekday() == 4:
+                status = "BLOCKED: Friday Premium Trap"
+                scan_results.append({'Symbol': symbol, 'Time': last_time.strftime('%H:%M:%S'), 'LTP': round(curr_ltf['close'], 2), '15m Trend': 'N/A', '15m ADX': 0.0, 'Signal': 'BLOCKED', 'Reason': status})
+                continue
+            if last_time.time() >= dt.time(13, 0):
+                status = "BLOCKED: Afternoon Window (>1:00 PM)"
+                scan_results.append({'Symbol': symbol, 'Time': last_time.strftime('%H:%M:%S'), 'LTP': round(curr_ltf['close'], 2), '15m Trend': 'N/A', '15m ADX': 0.0, 'Signal': 'BLOCKED', 'Reason': status})
+                continue
+
         is_bullish_trend = curr_15m['EMA_9'] > curr_15m['EMA_21']
         is_bearish_trend = curr_15m['EMA_9'] < curr_15m['EMA_21']
 
-        if require_adx and curr_15m['ADX_14'] < adx_threshold: status = f"Choppy (ADX {curr_15m['ADX_14']:.1f} < {adx_threshold})"
-        elif not (is_bullish_trend or is_bearish_trend): status = "No 15m Trend"
+        if require_adx and curr_15m['ADX_14'] < adx_threshold: 
+            status = f"Choppy (ADX {curr_15m['ADX_14']:.1f} < {adx_threshold})"
+        elif not (is_bullish_trend or is_bearish_trend): 
+            status = "No 15m Trend"
         else:
             bull_retrace = is_bullish_trend and (curr_ltf['low'] < curr_ltf['EMA_9'] or curr_ltf['low'] < curr_ltf['EMA_50']) and (curr_ltf['close'] > curr_ltf['EMA_9'] or curr_ltf['close'] > curr_ltf['EMA_50'])
             bear_retrace = is_bearish_trend and (curr_ltf['high'] > curr_ltf['EMA_9'] or curr_ltf['high'] > curr_ltf['EMA_50']) and (curr_ltf['close'] < curr_ltf['EMA_9'] or curr_ltf['close'] < curr_ltf['EMA_50'])
             
-            if not (bull_retrace or bear_retrace): status = "Awaiting Retracement"
+            if not (bull_retrace or bear_retrace): 
+                status = "Awaiting Retracement"
             else:
                 rsi_ok = (curr_15m['RSI_14'] > curr_15m['RSI_SMA_14']) if bull_retrace else (curr_15m['RSI_14'] < curr_15m['RSI_SMA_14'])
                 h1_ok = (curr_1h['close'] > curr_1h['SMA_20']) if bull_retrace else (curr_1h['close'] < curr_1h['SMA_20'])
