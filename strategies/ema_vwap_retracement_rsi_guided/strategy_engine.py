@@ -199,8 +199,16 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                     break
 
                 curr_spot_close = df_ltf.loc[step, 'close']
-                matching_15m = df_15m[df_15m['timestamp'] <= curr_time]
+                curr_ema9, curr_ema50 = df_ltf.loc[step, 'EMA_9'], df_ltf.loc[step, 'EMA_50']
                 
+                if trade_type == 'PE_SPREAD' and (curr_spot_close < curr_ema9 or curr_spot_close < curr_ema50):
+                    exit_reason, exit_time, exit_bar_step = "Dynamic Exit: LTF Close < EMA", curr_time, step
+                    break
+                elif trade_type == 'CE_SPREAD' and (curr_spot_close > curr_ema9 or curr_spot_close > curr_ema50):
+                    exit_reason, exit_time, exit_bar_step = "Dynamic Exit: LTF Close > EMA", curr_time, step
+                    break
+
+                matching_15m = df_15m[df_15m['timestamp'] <= curr_time]
                 if not matching_15m.empty:
                     m15_row = matching_15m.iloc[-1]
                     if trade_type == 'PE_SPREAD' and curr_spot_close < m15_row['ATR_Trailing_Long']:
@@ -237,23 +245,24 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
     return pd.DataFrame(all_trades)
 
 # -----------------------------------------------------------------------------------------
-# 📡 LIVE FORWARD SCANNER ENGINE
+# 📡 LIVE FORWARD SCANNER & VIRTUAL PAPER TRADING ENGINE
 # -----------------------------------------------------------------------------------------
 def run_live_scanner(symbols, upstox_token, require_color=False, require_expansion=False, 
                      require_rsi_sma=True, require_1h_sma=True, require_adx=True, 
-                     adx_threshold=20.0, ltf="3min", debug_func=print):
+                     adx_threshold=20.0, ltf="3min", sell_offset=0, buy_offset=2, 
+                     paper_trades=None, debug_func=print):
     
+    if paper_trades is None: paper_trades = {}
     scan_results = []
-    
-    # 🚨 FIX: Force Streamlit's UTC server to fetch data up to the current Indian Standard Time
     end_dt = datetime.utcnow() + timedelta(hours=5, minutes=30)
     warmup_start = end_dt - timedelta(days=15) 
+    today_start = end_dt.replace(hour=9, minute=15, second=0, microsecond=0)
 
     for symbol in symbols:
-        debug_func(f"Fetching live data for {symbol}...")
-        spot_1m = fetch_upstox_intraday_candles(symbol, warmup_start, end_dt, upstox_token, interval="1minute", log_func=debug_func)
+        debug_func(f"Fetching live spot data for {symbol}...")
+        spot_1m = fetch_upstox_intraday_candles(symbol, warmup_start, end_dt, upstox_token, interval="1minute", log_func=lambda x: None)
         if spot_1m.empty:
-            scan_results.append({'Symbol': symbol, 'Time': 'ERROR', 'LTP': 0.0, '15m Trend': 'EMPTY', '15m ADX': 0.0, 'Signal': 'ERROR', 'Reason': 'No data returned'})
+            scan_results.append({'Symbol': symbol, 'Spot LTP': 0.0, 'Strategy': '-', 'Entry Time': '-', 'Entry Premium': '-', 'Live PnL': '-', 'Signal / Reason': 'No data returned'})
             continue
 
         df_1h = spot_1m.set_index('timestamp').resample('1h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
@@ -277,16 +286,10 @@ def run_live_scanner(symbols, upstox_token, require_color=False, require_expansi
         if len(df_ltf) < 2: continue
         curr_ltf, last_time = df_ltf.iloc[-2], df_ltf.index[-2]
         
-        status, signal = "Awaiting Retracement", "NONE"
+        status = "Awaiting Retracement"
         if symbol == "SENSEX":
-            if last_time.weekday() == 4:
-                status = "BLOCKED: Friday Premium Trap"
-                scan_results.append({'Symbol': symbol, 'Time': last_time.strftime('%H:%M:%S'), 'LTP': round(curr_ltf['close'], 2), '15m Trend': 'N/A', '15m ADX': 0.0, 'Signal': 'BLOCKED', 'Reason': status})
-                continue
-            if last_time.time() >= dt.time(13, 0):
-                status = "BLOCKED: Afternoon Window (>1:00 PM)"
-                scan_results.append({'Symbol': symbol, 'Time': last_time.strftime('%H:%M:%S'), 'LTP': round(curr_ltf['close'], 2), '15m Trend': 'N/A', '15m ADX': 0.0, 'Signal': 'BLOCKED', 'Reason': status})
-                continue
+            if last_time.weekday() == 4: status = "BLOCKED: Friday Premium Trap"
+            elif last_time.time() >= dt.time(13, 0): status = "BLOCKED: Afternoon Window (>1:00 PM)"
 
         is_bullish_trend = curr_15m['EMA_9'] > curr_15m['EMA_21']
         is_bearish_trend = curr_15m['EMA_9'] < curr_15m['EMA_21']
@@ -295,26 +298,97 @@ def run_live_scanner(symbols, upstox_token, require_color=False, require_expansi
             status = f"Choppy (ADX {curr_15m['ADX_14']:.1f} < {adx_threshold})"
         elif not (is_bullish_trend or is_bearish_trend): 
             status = "No 15m Trend"
-        else:
+        elif status == "Awaiting Retracement":
             bull_retrace = is_bullish_trend and (curr_ltf['low'] < curr_ltf['EMA_9'] or curr_ltf['low'] < curr_ltf['EMA_50']) and (curr_ltf['close'] > curr_ltf['EMA_9'] or curr_ltf['close'] > curr_ltf['EMA_50'])
             bear_retrace = is_bearish_trend and (curr_ltf['high'] > curr_ltf['EMA_9'] or curr_ltf['high'] > curr_ltf['EMA_50']) and (curr_ltf['close'] < curr_ltf['EMA_9'] or curr_ltf['close'] < curr_ltf['EMA_50'])
             
-            if not (bull_retrace or bear_retrace): 
-                status = "Awaiting Retracement"
-            else:
+            if bull_retrace or bear_retrace: 
                 rsi_ok = (curr_15m['RSI_14'] > curr_15m['RSI_SMA_14']) if bull_retrace else (curr_15m['RSI_14'] < curr_15m['RSI_SMA_14'])
                 h1_ok = (curr_1h['close'] > curr_1h['SMA_20']) if bull_retrace else (curr_1h['close'] < curr_1h['SMA_20'])
                 
                 if require_rsi_sma and not rsi_ok: status = "Failed 15m RSI Momentum"
                 elif require_1h_sma and not h1_ok: status = "Failed 1H Trend Validation"
-                else:
-                    signal = "🟢 PE_SPREAD (BULLISH)" if bull_retrace else "🔴 CE_SPREAD (BEARISH)"
-                    status = "✅ ACTIVE SETUP DETECTED"
+                else: status = "✅ ACTIVE SETUP DETECTED"
 
+        # ----------------------------------------------------
+        # 📝 THE VIRTUAL PORTFOLIO MANAGER (PAPER TRADING)
+        # ----------------------------------------------------
+        is_active = symbol in paper_trades
+
+        # 1. TRIGGER A NEW ENTRY
+        if status == "✅ ACTIVE SETUP DETECTED" and not is_active:
+            debug_func(f"🟢 Edge Detected on {symbol}. Building Option Spread...")
+            strat_name = "Bull Put Spread" if bull_retrace else "Bear Call Spread"
+            trade_date = last_time.date()
+            raw_expiries = get_available_expiries(symbol, trade_date, upstox_token, log_func=lambda x: None)
+            valid_expiries = resolve_expiry(symbol, trade_date, raw_expiries, log_func=lambda x: None)
+
+            if valid_expiries:
+                target_expiry = valid_expiries[0]
+                if target_expiry == trade_date and len(valid_expiries) > 1: target_expiry = valid_expiries[1]
+
+                legs = build_spread_legs(symbol=symbol, entry_price=curr_ltf['close'], strategy_type=strat_name,
+                                         target_expiry_date=target_expiry, access_token=upstox_token,
+                                         sell_offset=sell_offset, buy_offset=buy_offset, log_func=lambda x: None)
+
+                if len(legs) == 2:
+                    l1_df = fetch_upstox_intraday_candles(legs[0]['key'], today_start, end_dt, upstox_token, interval="1minute", is_key=True, log_func=lambda x: None)
+                    l2_df = fetch_upstox_intraday_candles(legs[1]['key'], today_start, end_dt, upstox_token, interval="1minute", is_key=True, log_func=lambda x: None)
+
+                    if not l1_df.empty and not l2_df.empty:
+                        net_credit = l1_df.iloc[-1]['close'] - l2_df.iloc[-1]['close']
+                        paper_trades[symbol] = {
+                            'entry_time': last_time.strftime('%H:%M:%S'),
+                            'strategy': strat_name,
+                            'entry_price': round(net_credit, 2),
+                            'legs': legs,
+                            'lot_size': legs[0]['lot_size'] # Pulls native 1-lot size straight from Upstox API
+                        }
+                        is_active = True
+                        debug_func(f"🎯 Saved Virtual Trade for {symbol}: {strat_name} at ₹{net_credit} credit.")
+
+        # 2. TRACK LIVE METRICS
+        entry_time, strategy_type, entry_price_str, pnl_str, status_display = "-", "-", "-", "-", status
+
+        if is_active:
+            trade = paper_trades[symbol]
+            entry_time = trade['entry_time']
+            strategy_type = trade['strategy']
+            entry_price_str = f"₹{trade['entry_price']}"
+            status_display = "🟢 ACTIVE POSITION"
+
+            debug_func(f"📊 Calculating Live PnL for active {symbol} position...")
+            l1_df = fetch_upstox_intraday_candles(trade['legs'][0]['key'], today_start, end_dt, upstox_token, interval="1minute", is_key=True, log_func=lambda x: None)
+            l2_df = fetch_upstox_intraday_candles(trade['legs'][1]['key'], today_start, end_dt, upstox_token, interval="1minute", is_key=True, log_func=lambda x: None)
+
+            if not l1_df.empty and not l2_df.empty:
+                curr_credit = l1_df.iloc[-1]['close'] - l2_df.iloc[-1]['close']
+                pnl = round((trade['entry_price'] - curr_credit) * trade['lot_size'], 2)
+                
+                # Check dynamic structural exit for paper trades!
+                trade_type = 'PE_SPREAD' if "Put" in strategy_type else 'CE_SPREAD'
+                curr_spot_close = curr_ltf['close']
+                
+                if trade_type == 'PE_SPREAD' and (curr_spot_close < curr_ltf['EMA_9'] or curr_spot_close < curr_ltf['EMA_50']):
+                    status_display = "🔴 DYNAMIC EXIT TRIGGERED (Spot < EMA)"
+                    del paper_trades[symbol] # Auto-squares off position for the next tick
+                elif trade_type == 'CE_SPREAD' and (curr_spot_close > curr_ltf['EMA_9'] or curr_spot_close > curr_ltf['EMA_50']):
+                    status_display = "🔴 DYNAMIC EXIT TRIGGERED (Spot > EMA)"
+                    del paper_trades[symbol]
+                else:
+                    pnl_str = f"₹{pnl}"
+                    if pnl > 0: pnl_str = f"🟩 {pnl_str}"
+                    else: pnl_str = f"🟥 {pnl_str}"
+
+        # 3. APPEND DASHBOARD ROW
         scan_results.append({
-            'Symbol': symbol, 'Time': last_time.strftime('%H:%M:%S'), 'LTP': round(curr_ltf['close'], 2),
-            '15m Trend': "BULL" if is_bullish_trend else ("BEAR" if is_bearish_trend else "FLAT"),
-            '15m ADX': round(curr_15m['ADX_14'], 2), 'Signal': signal, 'Reason': status
+            'Symbol': symbol,
+            'Spot LTP': round(curr_ltf['close'], 2),
+            'Strategy': strategy_type,
+            'Entry Time': entry_time,
+            'Entry Premium': entry_price_str,
+            'Live PnL': pnl_str,
+            'Signal / Reason': status_display
         })
 
     return pd.DataFrame(scan_results)
