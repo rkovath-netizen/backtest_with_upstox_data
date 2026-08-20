@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import pandas_ta as ta
 import datetime as dt
@@ -188,6 +189,9 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             for step in range(start_ltf_idx + 1, len(df_ltf)):
                 curr_time = df_ltf.loc[step, 'timestamp']
                 
+                # ----------------------------------------------------
+                # 🛡️ TIME & STRUCTURAL EXITS
+                # ----------------------------------------------------
                 if curr_time > max_hold_time:
                     exit_reason, exit_time, exit_bar_step = "Time Stop (Max 3 Days Hit)", curr_time, step
                     break
@@ -218,6 +222,9 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                         exit_reason, exit_time, exit_bar_step = "15m Spot Close > ATR Trailing SL", curr_time, step
                         break
 
+                # ----------------------------------------------------
+                # 💰 PREMIUM DECAY/APPRECIATION EXITS
+                # ----------------------------------------------------
                 l1_curr, l2_curr = get_premium_at_time(leg_data[0]['df'], curr_time), get_premium_at_time(leg_data[1]['df'], curr_time)
                 current_pnl_per_qty = initial_net_credit - (l1_curr - l2_curr)
                 
@@ -250,19 +257,47 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
 def run_live_scanner(symbols, upstox_token, require_color=False, require_expansion=False, 
                      require_rsi_sma=True, require_1h_sma=True, require_adx=True, 
                      adx_threshold=20.0, ltf="3min", sell_offset=0, buy_offset=2, 
-                     paper_trades=None, debug_func=print):
+                     paper_trades=None, report_name="live_scan", debug_func=print):
     
     if paper_trades is None: paper_trades = {}
     scan_results = []
-    end_dt = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    
+    ist_time = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    end_dt = ist_time
     warmup_start = end_dt - timedelta(days=15) 
     today_start = end_dt.replace(hour=9, minute=15, second=0, microsecond=0)
+
+    # ----------------------------------------------------
+    # 📝 CSV LOGGING HELPER
+    # ----------------------------------------------------
+    def log_virtual_trade(action, sym, strat, spot, premium, leg1, leg2, lot, pnl, reason):
+        filename = f"{report_name}_live_trades_{ist_time.strftime('%Y-%m-%d')}.csv"
+        log_data = {
+            'Timestamp (IST)': ist_time.strftime('%Y-%m-%d %H:%M:%S'),
+            'Action': action,
+            'Symbol': sym,
+            'Strategy': strat,
+            'Spot Price': spot,
+            'Net Premium': premium,
+            'Sell Leg (ATM)': leg1,
+            'Buy Leg (OTM)': leg2,
+            'Lot Size': lot,
+            'Realized PnL (₹)': pnl,
+            'Notes': reason
+        }
+        df_log = pd.DataFrame([log_data])
+        # Append mode, creates header if file doesn't exist yet
+        df_log.to_csv(filename, mode='a', header=not os.path.exists(filename), index=False)
 
     for symbol in symbols:
         debug_func(f"Fetching live spot data for {symbol}...")
         spot_1m = fetch_upstox_intraday_candles(symbol, warmup_start, end_dt, upstox_token, interval="1minute", log_func=lambda x: None)
         if spot_1m.empty:
-            scan_results.append({'Symbol': symbol, 'Spot LTP': 0.0, 'Strategy': '-', 'Entry Time': '-', 'Entry Premium': '-', 'Live PnL': '-', 'Signal / Reason': 'No data returned'})
+            scan_results.append({
+                'Symbol': symbol, 'Spot LTP': 0.0, 'Strategy': '-', 'Entry Time': '-', 
+                'Entry Spot': '-', 'Sell Leg (ATM)': '-', 'Buy Leg (OTM)': '-', 
+                'Net Premium': '-', 'Live PnL': '-', 'Signal / Reason': 'No data returned'
+            })
             continue
 
         df_1h = spot_1m.set_index('timestamp').resample('1h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
@@ -336,25 +371,44 @@ def run_live_scanner(symbols, upstox_token, require_color=False, require_expansi
                     l2_df = fetch_upstox_intraday_candles(legs[1]['key'], today_start, end_dt, upstox_token, interval="1minute", is_key=True, log_func=lambda x: None)
 
                     if not l1_df.empty and not l2_df.empty:
-                        net_credit = l1_df.iloc[-1]['close'] - l2_df.iloc[-1]['close']
+                        l1_price = l1_df.iloc[-1]['close']
+                        l2_price = l2_df.iloc[-1]['close']
+                        net_credit = l1_price - l2_price
+                        
+                        opt_type = "PE" if "Put" in strat_name else "CE"
+                        leg1_desc = f"{int(legs[0]['strike'])} {opt_type} @ ₹{round(l1_price, 2)}"
+                        leg2_desc = f"{int(legs[1]['strike'])} {opt_type} @ ₹{round(l2_price, 2)}"
+                        
                         paper_trades[symbol] = {
                             'entry_time': last_time.strftime('%H:%M:%S'),
                             'strategy': strat_name,
+                            'entry_spot': round(curr_ltf['close'], 2),
                             'entry_price': round(net_credit, 2),
+                            'leg1_desc': leg1_desc,
+                            'leg2_desc': leg2_desc,
                             'legs': legs,
-                            'lot_size': legs[0]['lot_size'] # Pulls native 1-lot size straight from Upstox API
+                            'lot_size': legs[0]['lot_size']
                         }
                         is_active = True
                         debug_func(f"🎯 Saved Virtual Trade for {symbol}: {strat_name} at ₹{net_credit} credit.")
+                        
+                        # 🚨 CSV WRITE: LOG ENTRY
+                        log_virtual_trade("ENTRY", symbol, strat_name, round(curr_ltf['close'], 2), 
+                                          round(net_credit, 2), leg1_desc, leg2_desc, legs[0]['lot_size'], 
+                                          0.0, "Setup Detected")
 
         # 2. TRACK LIVE METRICS
-        entry_time, strategy_type, entry_price_str, pnl_str, status_display = "-", "-", "-", "-", status
+        entry_time, strategy_type, entry_spot_str = "-", "-", "-"
+        entry_price_str, leg1_str, leg2_str, pnl_str, status_display = "-", "-", "-", "-", status
 
         if is_active:
             trade = paper_trades[symbol]
             entry_time = trade['entry_time']
             strategy_type = trade['strategy']
+            entry_spot_str = f"{trade['entry_spot']}"
             entry_price_str = f"₹{trade['entry_price']}"
+            leg1_str = trade['leg1_desc']
+            leg2_str = trade['leg2_desc']
             status_display = "🟢 ACTIVE POSITION"
 
             debug_func(f"📊 Calculating Live PnL for active {symbol} position...")
@@ -365,15 +419,21 @@ def run_live_scanner(symbols, upstox_token, require_color=False, require_expansi
                 curr_credit = l1_df.iloc[-1]['close'] - l2_df.iloc[-1]['close']
                 pnl = round((trade['entry_price'] - curr_credit) * trade['lot_size'], 2)
                 
-                # Check dynamic structural exit for paper trades!
+                # Dynamic structural exit check
                 trade_type = 'PE_SPREAD' if "Put" in strategy_type else 'CE_SPREAD'
                 curr_spot_close = curr_ltf['close']
                 
                 if trade_type == 'PE_SPREAD' and (curr_spot_close < curr_ltf['EMA_9'] or curr_spot_close < curr_ltf['EMA_50']):
-                    status_display = "🔴 DYNAMIC EXIT TRIGGERED (Spot < EMA)"
-                    del paper_trades[symbol] # Auto-squares off position for the next tick
+                    status_display = "🔴 DYNAMIC EXIT (Spot < EMA)"
+                    # 🚨 CSV WRITE: LOG EXIT
+                    log_virtual_trade("EXIT", symbol, strategy_type, round(curr_spot_close, 2), round(curr_credit, 2),
+                                      leg1_str, leg2_str, trade['lot_size'], pnl, "Spot < EMA")
+                    del paper_trades[symbol] 
                 elif trade_type == 'CE_SPREAD' and (curr_spot_close > curr_ltf['EMA_9'] or curr_spot_close > curr_ltf['EMA_50']):
-                    status_display = "🔴 DYNAMIC EXIT TRIGGERED (Spot > EMA)"
+                    status_display = "🔴 DYNAMIC EXIT (Spot > EMA)"
+                    # 🚨 CSV WRITE: LOG EXIT
+                    log_virtual_trade("EXIT", symbol, strategy_type, round(curr_spot_close, 2), round(curr_credit, 2),
+                                      leg1_str, leg2_str, trade['lot_size'], pnl, "Spot > EMA")
                     del paper_trades[symbol]
                 else:
                     pnl_str = f"₹{pnl}"
@@ -386,7 +446,10 @@ def run_live_scanner(symbols, upstox_token, require_color=False, require_expansi
             'Spot LTP': round(curr_ltf['close'], 2),
             'Strategy': strategy_type,
             'Entry Time': entry_time,
-            'Entry Premium': entry_price_str,
+            'Entry Spot': entry_spot_str,
+            'Sell Leg (ATM)': leg1_str,
+            'Buy Leg (OTM)': leg2_str,
+            'Net Premium': entry_price_str,
             'Live PnL': pnl_str,
             'Signal / Reason': status_display
         })
