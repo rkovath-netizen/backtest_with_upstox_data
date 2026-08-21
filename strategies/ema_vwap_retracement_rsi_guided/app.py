@@ -120,8 +120,11 @@ def run_ema_rsi_app():
         st.markdown("### 📡 Real-Time Market Scanner & Virtual Portfolio")
         st.caption("Auto-captures live setups, builds option spread, pushes to GitHub CSV, and sends Email alerts.")
         
+        # 🚨 Initialize memory for both active AND finished trades
         if 'paper_trades' not in st.session_state:
             st.session_state.paper_trades = {}
+        if 'completed_trades' not in st.session_state:
+            st.session_state.completed_trades = []
 
         col1, col2, col3 = st.columns([1, 1, 2])
         col1.metric("Max Allowed Trades", max_concurrent)
@@ -131,6 +134,7 @@ def run_ema_rsi_app():
             st.write("Virtual Portfolio Manager")
             if st.button("🗑️ Square-Off / Reset All Virtual Trades"):
                 st.session_state.paper_trades = {}
+                st.session_state.completed_trades = [] # Resets the log table too
                 st.rerun()
 
         st.markdown("---")
@@ -148,7 +152,7 @@ def run_ema_rsi_app():
                 st.error("❌ Upstox Access Token is missing from Streamlit secrets.")
                 st.stop()
             
-            debug_expander = st.expander("🛠️ Deep Debug Console (API Traces)", expanded=True)
+            debug_expander = st.expander("🛠️ Deep Debug Console (API Traces)", expanded=False)
             debug_container = debug_expander.container()
 
             def scanner_debug_log(msg):
@@ -163,13 +167,27 @@ def run_ema_rsi_app():
                         require_adx=require_adx, adx_threshold=adx_threshold, ltf=ltf_choice,
                         sell_offset=sell_offset, buy_offset=buy_offset,
                         paper_trades=st.session_state.paper_trades,
+                        completed_trades=st.session_state.completed_trades, # 🚨 Passing the history log
                         report_name=report_name,
                         github_secrets=github_secrets,
                         email_secrets=email_secrets,
                         debug_func=scanner_debug_log
                     )
                 
+                # -------------------------------------------------------------
+                # 🚨 THE NEW DUAL-TABLE DASHBOARD VIEW
+                # -------------------------------------------------------------
+                st.markdown("#### 📜 Today's Closed Trades (Session Log)")
+                if st.session_state.completed_trades:
+                    history_df = pd.DataFrame(st.session_state.completed_trades)
+                    # Styling the PnL column if it exists
+                    st.dataframe(history_df, use_container_width=True)
+                else:
+                    st.info("No trades have been completed yet today.")
+                
+                st.markdown("#### 📡 Live Market Scanner (Active Monitor)")
                 st.dataframe(scan_df, use_container_width=True)
+                
                 ist_time = dt.datetime.utcnow() + timedelta(hours=5, minutes=30)
                 st.caption(f"Last scanned at: {ist_time.strftime('%I:%M:%S %p')} (IST)")
                 
