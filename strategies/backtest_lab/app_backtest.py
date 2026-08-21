@@ -96,13 +96,36 @@ def run_ema_rsi_app():
                 st.subheader("📝 Trade Ledger")
                 st.dataframe(results_df, use_container_width=True)
                 
-                # File export with filter description in name
+               # ==========================================
+                # FILE EXPORT & GITHUB UPLOAD
+                # ==========================================
                 ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
                 blocked_str = "_No" + "-".join([d[:2] for d in blocked_days]) if blocked_days else "_AllDays"
                 file_name = f"BT_SL{int(sl_pct*100)}_TGT{int(target_pct*100)}{blocked_str}_1HRSI_{require_1h_rsi}_{ts}.csv"
                 
-                csv = results_df.to_csv(index=False).encode('utf-8')
-                st.download_button(f"⬇️ Download {file_name}", data=csv, file_name=file_name, mime="text/csv")
+                csv_data = results_df.to_csv(index=False)
+                
+                # 1. Provide Instant Download
+                st.download_button(f"⬇️ Download {file_name}", data=csv_data.encode('utf-8'), file_name=file_name, mime="text/csv")
+                
+                # 2. Push to GitHub Data Outputs Folder
+                try:
+                    from github import Github
+                    gh_token = st.secrets["GITHUB_TOKEN"]
+                    g = Github(gh_token)
+                    # Replace 'rkovath/backtest_with_upstox_data' with your actual username/repo
+                    repo = g.get_repo("rkovath/backtest_with_upstox_data") 
+                    
+                    file_path = f"data_outputs/{file_name}"
+                    repo.create_file(
+                        path=file_path, 
+                        message=f"Automated backtest export: {file_name}", 
+                        content=csv_data, 
+                        branch="main"
+                    )
+                    st.success(f"✅ File successfully saved to GitHub: `{file_path}`")
+                except Exception as e:
+                    st.warning(f"⚠️ Could not push to GitHub (Check GITHUB_TOKEN secret). Error: {e}")
                 
         except Exception as e:
             st.error(f"Error: {e}")
