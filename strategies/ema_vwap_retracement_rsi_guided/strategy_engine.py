@@ -17,7 +17,7 @@ def get_premium_at_time(df, target_time):
     return past.iloc[-1]['close'] if not past.empty else 0.0
 
 # -----------------------------------------------------------------------------------------
-# 📊 HISTORICAL BACKTEST ENGINE (Unchanged for safety)
+# 📊 HISTORICAL BACKTEST ENGINE
 # -----------------------------------------------------------------------------------------
 def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token, sell_offset=2, buy_offset=4, 
                                     require_color=False, require_expansion=False, require_rsi_sma=True, require_1h_sma=True, 
@@ -253,7 +253,6 @@ def send_trade_email(subject, body, email_secrets, debug_func):
     receiver = email_secrets.get("receiver")
     
     if not sender or not pwd:
-        debug_func("⚠️ Email secrets missing. Skipping email alert.")
         return
         
     try:
@@ -294,7 +293,6 @@ def log_virtual_trade_github(action, sym, strat, spot, premium, leg1, leg2, lot,
         df_new = pd.DataFrame([log_data])
         
         try:
-            # File exists -> Append
             contents = repo.get_contents(file_path)
             existing_content = base64.b64decode(contents.content).decode('utf-8')
             new_csv_string = df_new.to_csv(index=False, header=False)
@@ -302,13 +300,10 @@ def log_virtual_trade_github(action, sym, strat, spot, premium, leg1, leg2, lot,
             
             repo.update_file(contents.path, f"Trade Log API Commit: {action} {sym}", updated_content, contents.sha)
             debug_func(f"💾 Updated remote GitHub CSV: {file_path}")
-            
         except Exception:
-            # File does not exist -> Create
             new_csv_string = df_new.to_csv(index=False, header=True)
             repo.create_file(file_path, f"Create API Log File: {date_str}", new_csv_string)
             debug_func(f"💾 Created remote GitHub CSV: {file_path}")
-            
     except Exception as e:
         debug_func(f"❌ GitHub API Error: {str(e)}")
 
@@ -318,9 +313,10 @@ def log_virtual_trade_github(action, sym, strat, spot, premium, leg1, leg2, lot,
 def run_live_scanner(symbols, upstox_token, require_color=False, require_expansion=False, 
                      require_rsi_sma=True, require_1h_sma=True, require_adx=True, 
                      adx_threshold=20.0, ltf="3min", sell_offset=0, buy_offset=2, 
-                     paper_trades=None, report_name="live_scan", github_secrets=None, email_secrets=None, debug_func=print):
+                     paper_trades=None, completed_trades=None, report_name="live_scan", github_secrets=None, email_secrets=None, debug_func=print):
     
     if paper_trades is None: paper_trades = {}
+    if completed_trades is None: completed_trades = []
     if github_secrets is None: github_secrets = {}
     if email_secrets is None: email_secrets = {}
     
@@ -386,9 +382,6 @@ def run_live_scanner(symbols, upstox_token, require_color=False, require_expansi
                 elif require_1h_sma and not h1_ok: status = "Failed 1H Trend Validation"
                 else: status = "✅ ACTIVE SETUP DETECTED"
 
-        # ----------------------------------------------------
-        # 📝 THE VIRTUAL PORTFOLIO MANAGER (PAPER TRADING)
-        # ----------------------------------------------------
         is_active = symbol in paper_trades
 
         # 1. TRIGGER A NEW ENTRY
@@ -463,11 +456,12 @@ def run_live_scanner(symbols, upstox_token, require_color=False, require_expansi
                 curr_credit = l1_df.iloc[-1]['close'] - l2_df.iloc[-1]['close']
                 pnl = round((trade['entry_price'] - curr_credit) * trade['lot_size'], 2)
                 
-                # Dynamic structural exit check
                 trade_type = 'PE_SPREAD' if "Put" in strategy_type else 'CE_SPREAD'
                 curr_spot_close = curr_ltf['close']
                 
                 exit_reason = None
+                
+                # Check Dynamic Exits
                 if trade_type == 'PE_SPREAD' and (curr_spot_close < curr_ltf['EMA_9'] or curr_spot_close < curr_ltf['EMA_50']):
                     exit_reason = "Spot < EMA (Bullish Failure)"
                     status_display = "🔴 DYNAMIC EXIT (Spot < EMA)"
@@ -475,13 +469,36 @@ def run_live_scanner(symbols, upstox_token, require_color=False, require_expansi
                     exit_reason = "Spot > EMA (Bearish Failure)"
                     status_display = "🔴 DYNAMIC EXIT (Spot > EMA)"
                 
+                # Check Target / SL Exits
+                if not exit_reason:
+                    current_pnl_per_qty = trade['entry_price'] - curr_credit
+                    if current_pnl_per_qty >= (0.50 * trade['entry_price']):
+                        exit_reason = "Target Hit (50% Decay)"
+                        status_display = "🟢 TARGET HIT"
+                    elif current_pnl_per_qty <= (-0.60 * trade['entry_price']):
+                        exit_reason = "SL Hit (60% Apprec.)"
+                        status_display = "🔴 SL HIT"
+                
                 if exit_reason:
-                    # 🚨 CLOUD LOGGING & ALERTS
+                    # 🚨 1. APPEND TO UI DASHBOARD HISTORY TABLE
+                    completed_trades.append({
+                        'Symbol': symbol,
+                        'Strategy': strategy_type,
+                        'Entry Time': trade['entry_time'],
+                        'Exit Time': last_time.strftime('%H:%M:%S'),
+                        'Entry Premium': f"₹{trade['entry_price']}",
+                        'Exit Premium': f"₹{round(curr_credit, 2)}",
+                        'Realized PnL': f"₹{pnl}",
+                        'Exit Reason': exit_reason
+                    })
+                    
+                    # 🚨 2. CLOUD LOGGING & ALERTS
                     log_virtual_trade_github("EXIT", symbol, strategy_type, round(curr_spot_close, 2), round(curr_credit, 2),
                                       leg1_str, leg2_str, trade['lot_size'], pnl, exit_reason, report_name, github_secrets, debug_func)
                     
                     email_body = f"TRADE EXIT ALERT\n\nSymbol: {symbol}\nStrategy: {strategy_type}\nExit Reason: {exit_reason}\nRealized PnL: ₹{pnl}\n\nTime (IST): {last_time.strftime('%H:%M:%S')}"
                     send_trade_email(f"🔴 EXIT ALERT: {symbol} (₹{pnl})", email_body, email_secrets, debug_func)
+                    
                     del paper_trades[symbol] 
                 else:
                     pnl_str = f"₹{pnl}"
