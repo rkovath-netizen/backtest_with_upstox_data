@@ -6,8 +6,8 @@ from datetime import timedelta
 from strategies.backtest_lab.strategy_engine_backtest import process_ema_rsi_guided_strategy
 
 def run_ema_rsi_app():
-    st.title("🔬 R&D Backtest Lab: Original Setup")
-    st.markdown("Baseline options spread strategy with macro risk management parameters.")
+    st.title("🔬 R&D Backtest Lab: Configurable Risk & Schedule")
+    st.markdown("Test individual risk variables, day-of-week blocks, and macro trend filters to eliminate drawdown.")
 
     try: upstox_token = st.secrets["UPSTOX_TOKEN"] 
     except KeyError:
@@ -18,26 +18,36 @@ def run_ema_rsi_app():
     st.sidebar.header("1. Data Configuration")
     today = dt.date.today()
     end_date = st.sidebar.date_input("End Date", today)
-    start_date = st.sidebar.date_input("Start Date", today - timedelta(days=30))
+    start_date = st.sidebar.date_input("Start Date", today - timedelta(days=50))
     symbols = st.sidebar.multiselect("Symbols", ["NIFTY", "SENSEX", "BANKNIFTY", "CRUDEOILM", "NATGASMINI"], default=["NIFTY", "SENSEX"])
 
-    # 2. Strategy Parameters
-    st.sidebar.header("2. Strategy Parameters")
+    # 2. Risk & Target Framework
+    st.sidebar.header("2. Risk & Target Rules")
+    target_pct = st.sidebar.number_input("Profit Target (% Net Credit Decay)", value=50, min_value=10, max_value=100, step=5) / 100.0
+    sl_pct = st.sidebar.number_input("Stop Loss (% Premium Appreciation)", value=40, min_value=10, max_value=150, step=5) / 100.0
+    max_concurrent = st.sidebar.number_input("Max Concurrent Trades", value=3, step=1)
+    
+    # 3. Schedule & Expiry Filter
+    st.sidebar.header("3. Day of Week Exclusions")
+    blocked_days = st.sidebar.multiselect(
+        "Block Trade Entries on Specific Days",
+        options=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+        default=[] # Set to default empty so you can toggle
+    )
+
+    # 4. Strategy & Entry Filters
+    st.sidebar.header("4. Strategy & Trend Filters")
     ltf = st.sidebar.selectbox("Lower Timeframe (LTF)", ["1min", "3min", "5min", "15min"], index=1)
     sell_offset = st.sidebar.number_input("Sell Leg Offset (from Spot)", value=2, step=1)
     buy_offset = st.sidebar.number_input("Buy Leg Offset (from Spot)", value=4, step=1)
-    max_concurrent = st.sidebar.number_input("Max Concurrent Trades", value=3, step=1)
-
-    # 3. Entry Filters
-    st.sidebar.header("3. Entry Filters")
-    require_color = st.sidebar.checkbox("Require Candle Color Match", value=False)
-    require_expansion = st.sidebar.checkbox("Require Candle Expansion", value=False)
+    
+    require_1h_rsi = st.sidebar.checkbox("Require 1H RSI Momentum (>50 for Bull, <50 for Bear)", value=False)
+    require_1h_sma = st.sidebar.checkbox("Require 1H Trend Alignment (SMA 20)", value=True)
     require_rsi_sma = st.sidebar.checkbox("Require 15m RSI > RSI SMA", value=True)
-    require_1h_sma = st.sidebar.checkbox("Require 1H Trend Alignment", value=True)
     require_adx = st.sidebar.checkbox("Require ADX Filter", value=True)
     adx_threshold = st.sidebar.number_input("ADX Threshold", value=20.0, step=1.0) if require_adx else 0.0
 
-    if st.button("🚀 Run Original Backtest", use_container_width=True):
+    if st.button("🚀 Run Backtest Experiment", use_container_width=True):
         if not symbols: return st.error("Please select at least one symbol.")
         
         progress_bar = st.progress(0)
@@ -50,8 +60,12 @@ def run_ema_rsi_app():
             results_df = process_ema_rsi_guided_strategy(
                 symbols=symbols, start_date=start_date, end_date=end_date, upstox_token=upstox_token,
                 sell_offset=sell_offset, buy_offset=buy_offset,
-                require_color=require_color, require_expansion=require_expansion,
+                target_decay_pct=target_pct,
+                sl_appreciation_pct=sl_pct,
+                blocked_days=blocked_days,
+                require_color=False, require_expansion=False,
                 require_rsi_sma=require_rsi_sma, require_1h_sma=require_1h_sma, 
+                require_1h_rsi=require_1h_rsi,
                 require_adx=require_adx, adx_threshold=adx_threshold,
                 ltf=ltf, max_concurrent_trades=max_concurrent,
                 progress_callback=ui_progress, log_func=ui_log
@@ -59,9 +73,8 @@ def run_ema_rsi_app():
             progress_bar.progress(100)
             status_text.text("✅ Backtest Complete!")
             
-            if results_df.empty: st.warning("No trades generated.")
+            if results_df.empty: st.warning("No trades generated with current parameters.")
             else:
-                # Metrics
                 st.subheader("📊 Performance Summary")
                 total = len(results_df)
                 wins = len(results_df[results_df['PnL (₹)'] > 0])
@@ -83,9 +96,10 @@ def run_ema_rsi_app():
                 st.subheader("📝 Trade Ledger")
                 st.dataframe(results_df, use_container_width=True)
                 
-                # Dynamic File Naming
+                # File export with filter description in name
                 ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-                file_name = f"BT_Original_Setup_{ts}.csv"
+                blocked_str = "_No" + "-".join([d[:2] for d in blocked_days]) if blocked_days else "_AllDays"
+                file_name = f"BT_SL{int(sl_pct*100)}_TGT{int(target_pct*100)}{blocked_str}_1HRSI_{require_1h_rsi}_{ts}.csv"
                 
                 csv = results_df.to_csv(index=False).encode('utf-8')
                 st.download_button(f"⬇️ Download {file_name}", data=csv, file_name=file_name, mime="text/csv")
