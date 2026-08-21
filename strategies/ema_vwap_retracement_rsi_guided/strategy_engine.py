@@ -4,6 +4,10 @@ import pandas_ta as ta
 import datetime as dt
 from datetime import timedelta, datetime
 import traceback
+import smtplib
+from email.mime.text import MIMEText
+import base64
+from github import Github
 from common.market_data import fetch_upstox_intraday_candles, get_available_expiries
 from common.market_calendar import resolve_expiry
 from common.options_builder import build_spread_legs
@@ -13,7 +17,7 @@ def get_premium_at_time(df, target_time):
     return past.iloc[-1]['close'] if not past.empty else 0.0
 
 # -----------------------------------------------------------------------------------------
-# 📊 HISTORICAL BACKTEST ENGINE
+# 📊 HISTORICAL BACKTEST ENGINE (Unchanged for safety)
 # -----------------------------------------------------------------------------------------
 def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token, sell_offset=2, buy_offset=4, 
                                     require_color=False, require_expansion=False, require_rsi_sma=True, require_1h_sma=True, 
@@ -30,8 +34,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
         warmup_start = start_dt - timedelta(days=15)
         
         spot_1m = fetch_upstox_intraday_candles(symbol, warmup_start, end_dt, upstox_token, interval="1minute", log_func=log_func)
-        if spot_1m.empty:
-            continue
+        if spot_1m.empty: continue
 
         actual_start = spot_1m['timestamp'].min().strftime('%Y-%m-%d')
         actual_end = spot_1m['timestamp'].max().strftime('%Y-%m-%d')
@@ -67,9 +70,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
         
         for j in range(1, len(df_ltf) - 1):
             c_time = df_ltf.loc[j, 'timestamp']
-            
             if c_time < start_dt or c_time > end_dt: continue
-                
             stats['total'] += 1
 
             if symbol == "SENSEX":
@@ -102,13 +103,11 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             
             is_bullish_trend = ema9_15 > ema21_15
             is_bearish_trend = ema9_15 < ema21_15
-            
             if not (is_bullish_trend or is_bearish_trend): continue
             stats['trend'] += 1
             
             bullish_retracement = is_bullish_trend and (c_low < c_ema9 or c_low < c_ema50) and (c_close > c_ema9 or c_close > c_ema50)
             bearish_retracement = is_bearish_trend and (c_high > c_ema9 or c_high > c_ema50) and (c_close < c_ema9 or c_close < c_ema50)
-            
             if not (bullish_retracement or bearish_retracement): continue
             stats['retrace'] += 1
             
@@ -189,9 +188,6 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             for step in range(start_ltf_idx + 1, len(df_ltf)):
                 curr_time = df_ltf.loc[step, 'timestamp']
                 
-                # ----------------------------------------------------
-                # 🛡️ TIME & STRUCTURAL EXITS
-                # ----------------------------------------------------
                 if curr_time > max_hold_time:
                     exit_reason, exit_time, exit_bar_step = "Time Stop (Max 3 Days Hit)", curr_time, step
                     break
@@ -222,9 +218,6 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                         exit_reason, exit_time, exit_bar_step = "15m Spot Close > ATR Trailing SL", curr_time, step
                         break
 
-                # ----------------------------------------------------
-                # 💰 PREMIUM DECAY/APPRECIATION EXITS
-                # ----------------------------------------------------
                 l1_curr, l2_curr = get_premium_at_time(leg_data[0]['df'], curr_time), get_premium_at_time(leg_data[1]['df'], curr_time)
                 current_pnl_per_qty = initial_net_credit - (l1_curr - l2_curr)
                 
@@ -252,48 +245,90 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
     return pd.DataFrame(all_trades)
 
 # -----------------------------------------------------------------------------------------
+# 📡 ALERTS & LOGGING HELPER FUNCTIONS
+# -----------------------------------------------------------------------------------------
+def send_trade_email(subject, body, email_secrets, debug_func):
+    sender = email_secrets.get("sender")
+    pwd = email_secrets.get("password")
+    receiver = email_secrets.get("receiver")
+    
+    if not sender or not pwd:
+        debug_func("⚠️ Email secrets missing. Skipping email alert.")
+        return
+        
+    try:
+        msg = MIMEText(body)
+        msg['Subject'] = subject
+        msg['From'] = sender
+        msg['To'] = receiver
+        
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(sender, pwd)
+            server.sendmail(sender, receiver, msg.as_string())
+        debug_func("📧 Email alert sent successfully!")
+    except Exception as e:
+        debug_func(f"❌ Failed to send email alert: {e}")
+
+def log_virtual_trade_github(action, sym, strat, spot, premium, leg1, leg2, lot, pnl, reason, report_name, github_secrets, debug_func):
+    pat = github_secrets.get("pat")
+    repo_name = github_secrets.get("repo")
+    
+    if not pat:
+        debug_func("⚠️ GITHUB_PAT missing. Cannot append CSV to GitHub.")
+        return
+
+    ist_time = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    date_str = ist_time.strftime('%Y-%m-%d')
+    file_path = f"dataoutput/{report_name}_live_trades_{date_str}.csv"
+    
+    log_data = {
+        'Timestamp (IST)': ist_time.strftime('%Y-%m-%d %H:%M:%S'),
+        'Action': action, 'Symbol': sym, 'Strategy': strat, 'Spot Price': spot,
+        'Net Premium': premium, 'Sell Leg (ATM)': leg1, 'Buy Leg (OTM)': leg2,
+        'Lot Size': lot, 'Realized PnL (₹)': pnl, 'Notes': reason
+    }
+    
+    try:
+        g = Github(pat)
+        repo = g.get_repo(repo_name)
+        df_new = pd.DataFrame([log_data])
+        
+        try:
+            # File exists -> Append
+            contents = repo.get_contents(file_path)
+            existing_content = base64.b64decode(contents.content).decode('utf-8')
+            new_csv_string = df_new.to_csv(index=False, header=False)
+            updated_content = existing_content + new_csv_string
+            
+            repo.update_file(contents.path, f"Trade Log API Commit: {action} {sym}", updated_content, contents.sha)
+            debug_func(f"💾 Updated remote GitHub CSV: {file_path}")
+            
+        except Exception:
+            # File does not exist -> Create
+            new_csv_string = df_new.to_csv(index=False, header=True)
+            repo.create_file(file_path, f"Create API Log File: {date_str}", new_csv_string)
+            debug_func(f"💾 Created remote GitHub CSV: {file_path}")
+            
+    except Exception as e:
+        debug_func(f"❌ GitHub API Error: {str(e)}")
+
+# -----------------------------------------------------------------------------------------
 # 📡 LIVE FORWARD SCANNER & VIRTUAL PAPER TRADING ENGINE
 # -----------------------------------------------------------------------------------------
 def run_live_scanner(symbols, upstox_token, require_color=False, require_expansion=False, 
                      require_rsi_sma=True, require_1h_sma=True, require_adx=True, 
                      adx_threshold=20.0, ltf="3min", sell_offset=0, buy_offset=2, 
-                     paper_trades=None, report_name="live_scan", debug_func=print):
+                     paper_trades=None, report_name="live_scan", github_secrets=None, email_secrets=None, debug_func=print):
     
     if paper_trades is None: paper_trades = {}
-    scan_results = []
+    if github_secrets is None: github_secrets = {}
+    if email_secrets is None: email_secrets = {}
     
+    scan_results = []
     ist_time = datetime.utcnow() + timedelta(hours=5, minutes=30)
     end_dt = ist_time
     warmup_start = end_dt - timedelta(days=15) 
     today_start = end_dt.replace(hour=9, minute=15, second=0, microsecond=0)
-
-    # ----------------------------------------------------
-    # 📝 CSV LOGGING HELPER (ROUTES TO dataoutput FOLDER)
-    # ----------------------------------------------------
-    def log_virtual_trade(action, sym, strat, spot, premium, leg1, leg2, lot, pnl, reason):
-        # 🚨 Ensure target folder exists 
-        output_dir = "dataoutput"
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Build file path inside dataoutput folder
-        filename = os.path.join(output_dir, f"{report_name}_live_trades_{ist_time.strftime('%Y-%m-%d')}.csv")
-        
-        log_data = {
-            'Timestamp (IST)': ist_time.strftime('%Y-%m-%d %H:%M:%S'),
-            'Action': action,
-            'Symbol': sym,
-            'Strategy': strat,
-            'Spot Price': spot,
-            'Net Premium': premium,
-            'Sell Leg (ATM)': leg1,
-            'Buy Leg (OTM)': leg2,
-            'Lot Size': lot,
-            'Realized PnL (₹)': pnl,
-            'Notes': reason
-        }
-        df_log = pd.DataFrame([log_data])
-        # Append mode, creates header if file doesn't exist yet
-        df_log.to_csv(filename, mode='a', header=not os.path.exists(filename), index=False)
 
     for symbol in symbols:
         debug_func(f"Fetching live spot data for {symbol}...")
@@ -398,10 +433,13 @@ def run_live_scanner(symbols, upstox_token, require_color=False, require_expansi
                         is_active = True
                         debug_func(f"🎯 Saved Virtual Trade for {symbol}: {strat_name} at ₹{net_credit} credit.")
                         
-                        # 🚨 CSV WRITE: LOG ENTRY
-                        log_virtual_trade("ENTRY", symbol, strat_name, round(curr_ltf['close'], 2), 
+                        # 🚨 CLOUD LOGGING & ALERTS
+                        log_virtual_trade_github("ENTRY", symbol, strat_name, round(curr_ltf['close'], 2), 
                                           round(net_credit, 2), leg1_desc, leg2_desc, legs[0]['lot_size'], 
-                                          0.0, "Setup Detected")
+                                          0.0, "Setup Detected", report_name, github_secrets, debug_func)
+                        
+                        email_body = f"TRADE ENTRY ALERT\n\nSymbol: {symbol}\nStrategy: {strat_name}\nSpot Level: {round(curr_ltf['close'], 2)}\nNet Credit: ₹{round(net_credit, 2)}\n\nSell Leg: {leg1_desc}\nBuy Leg: {leg2_desc}\n\nTime (IST): {last_time.strftime('%H:%M:%S')}"
+                        send_trade_email(f"🟢 ENTRY ALERT: {symbol} {strat_name}", email_body, email_secrets, debug_func)
 
         # 2. TRACK LIVE METRICS
         entry_time, strategy_type, entry_spot_str = "-", "-", "-"
@@ -429,18 +467,22 @@ def run_live_scanner(symbols, upstox_token, require_color=False, require_expansi
                 trade_type = 'PE_SPREAD' if "Put" in strategy_type else 'CE_SPREAD'
                 curr_spot_close = curr_ltf['close']
                 
+                exit_reason = None
                 if trade_type == 'PE_SPREAD' and (curr_spot_close < curr_ltf['EMA_9'] or curr_spot_close < curr_ltf['EMA_50']):
+                    exit_reason = "Spot < EMA (Bullish Failure)"
                     status_display = "🔴 DYNAMIC EXIT (Spot < EMA)"
-                    # 🚨 CSV WRITE: LOG EXIT
-                    log_virtual_trade("EXIT", symbol, strategy_type, round(curr_spot_close, 2), round(curr_credit, 2),
-                                      leg1_str, leg2_str, trade['lot_size'], pnl, "Spot < EMA")
-                    del paper_trades[symbol] 
                 elif trade_type == 'CE_SPREAD' and (curr_spot_close > curr_ltf['EMA_9'] or curr_spot_close > curr_ltf['EMA_50']):
+                    exit_reason = "Spot > EMA (Bearish Failure)"
                     status_display = "🔴 DYNAMIC EXIT (Spot > EMA)"
-                    # 🚨 CSV WRITE: LOG EXIT
-                    log_virtual_trade("EXIT", symbol, strategy_type, round(curr_spot_close, 2), round(curr_credit, 2),
-                                      leg1_str, leg2_str, trade['lot_size'], pnl, "Spot > EMA")
-                    del paper_trades[symbol]
+                
+                if exit_reason:
+                    # 🚨 CLOUD LOGGING & ALERTS
+                    log_virtual_trade_github("EXIT", symbol, strategy_type, round(curr_spot_close, 2), round(curr_credit, 2),
+                                      leg1_str, leg2_str, trade['lot_size'], pnl, exit_reason, report_name, github_secrets, debug_func)
+                    
+                    email_body = f"TRADE EXIT ALERT\n\nSymbol: {symbol}\nStrategy: {strategy_type}\nExit Reason: {exit_reason}\nRealized PnL: ₹{pnl}\n\nTime (IST): {last_time.strftime('%H:%M:%S')}"
+                    send_trade_email(f"🔴 EXIT ALERT: {symbol} (₹{pnl})", email_body, email_secrets, debug_func)
+                    del paper_trades[symbol] 
                 else:
                     pnl_str = f"₹{pnl}"
                     if pnl > 0: pnl_str = f"🟩 {pnl_str}"
