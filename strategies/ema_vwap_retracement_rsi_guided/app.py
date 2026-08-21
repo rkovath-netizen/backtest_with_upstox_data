@@ -53,21 +53,25 @@ def run_ema_rsi_app():
     start_date = st.sidebar.date_input("Start Date", value=default_start)
     end_date = st.sidebar.date_input("End Date", value=default_end)
 
-    if "UPSTOX_ACCESS_TOKEN" in st.secrets:
-        upstox_token = st.secrets["UPSTOX_ACCESS_TOKEN"]
-    elif "UPSTOX_TOKEN" in st.secrets:
-        upstox_token = st.secrets["UPSTOX_TOKEN"]
-    else:
-        upstox_token = st.session_state.get("upstox_access_token", "")
+    # SECRETS INGESTION
+    upstox_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", st.secrets.get("UPSTOX_TOKEN", st.session_state.get("upstox_access_token", "")))
+    
+    github_secrets = {
+        "pat": st.secrets.get("GITHUB_PAT", ""),
+        "repo": st.secrets.get("GITHUB_REPO", "rkovath-netizen/backtest_with_upstox_data")
+    }
+    
+    email_secrets = {
+        "sender": st.secrets.get("EMAIL_SENDER", ""),
+        "password": st.secrets.get("EMAIL_PASSWORD", ""),
+        "receiver": st.secrets.get("EMAIL_RECEIVER", st.secrets.get("EMAIL_SENDER", ""))
+    }
 
     # -------------------------------------------------------------
     # 🚀 TABS: Backtester vs Live Scanner
     # -------------------------------------------------------------
     tab1, tab2 = st.tabs(["📊 Historical Backtest", "📡 Live Forward Scanner"])
 
-    # ==========================================
-    # TAB 1: HISTORICAL BACKTEST
-    # ==========================================
     with tab1:
         log_expander = st.expander("🛠️ Execution Logs", expanded=True)
         log_container = log_expander.container()
@@ -76,11 +80,8 @@ def run_ema_rsi_app():
             log_container.write(msg)
 
         if st.button("🚀 Run Backtest"):
-            if not symbols_selected:
-                st.error("❌ Please select at least one index to scan.")
-                st.stop()
-            if not upstox_token:
-                st.error("❌ Upstox Access Token is missing from Streamlit secrets.")
+            if not symbols_selected or not upstox_token:
+                st.error("❌ Missing Indices or Upstox Token.")
                 st.stop()
 
             progress_bar = st.progress(0)
@@ -109,18 +110,15 @@ def run_ema_rsi_app():
             status_text.empty()
 
             if trades_df.empty:
-                st.warning("⚠️ No trades were generated for the selected parameters and date range.")
+                st.warning("⚠️ No trades were generated.")
             else:
                 st.success(f"✅ Backtest completed! Found {len(trades_df)} trades.")
                 st.dataframe(trades_df, use_container_width=True)
                 st.download_button(label="📥 Download Trades CSV", data=trades_df.to_csv(index=False).encode('utf-8'), file_name=f"{report_name}.csv", mime="text/csv")
 
-    # ==========================================
-    # TAB 2: LIVE FORWARD SCANNER (PAPER TRADING)
-    # ==========================================
     with tab2:
         st.markdown("### 📡 Real-Time Market Scanner & Virtual Portfolio")
-        st.caption("Auto-captures live setups, builds the option spread, and tracks Notional PnL.")
+        st.caption("Auto-captures live setups, builds option spread, pushes to GitHub CSV, and sends Email alerts.")
         
         if 'paper_trades' not in st.session_state:
             st.session_state.paper_trades = {}
@@ -143,7 +141,7 @@ def run_ema_rsi_app():
             auto_scan = st.toggle("🔄 Auto-Scan (Every 60 Seconds)", value=False)
         
         if len(st.session_state.paper_trades) >= (max_concurrent * len(symbols_selected)):
-            st.warning("⚠️ Max Concurrency Reached. Scanner will track open trades but block new entries.")
+            st.warning("⚠️ Max Concurrency Reached. Blocking new entries.")
         
         if manual_scan or auto_scan:
             if not upstox_token:
@@ -165,7 +163,9 @@ def run_ema_rsi_app():
                         require_adx=require_adx, adx_threshold=adx_threshold, ltf=ltf_choice,
                         sell_offset=sell_offset, buy_offset=buy_offset,
                         paper_trades=st.session_state.paper_trades,
-                        report_name=report_name, # 🚨 Passed Report Name for CSV Logging
+                        report_name=report_name,
+                        github_secrets=github_secrets,
+                        email_secrets=email_secrets,
                         debug_func=scanner_debug_log
                     )
                 
@@ -174,7 +174,7 @@ def run_ema_rsi_app():
                 st.caption(f"Last scanned at: {ist_time.strftime('%I:%M:%S %p')} (IST)")
                 
                 if '🟢 ACTIVE POSITION' in scan_df['Signal / Reason'].values:
-                    st.success("🔔 **VIRTUAL PORTFOLIO ACTIVE!** Tracking Notional PnL above.")
+                    st.success("🔔 **VIRTUAL PORTFOLIO ACTIVE!**")
                     
             except Exception as e:
                 st.error("🚨 LIVE SCANNER EXCEPTION ENCOUNTERED:")
