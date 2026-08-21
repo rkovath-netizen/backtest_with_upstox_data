@@ -114,7 +114,7 @@ def run_ema_rsi_app():
                     gh_token = st.secrets["GITHUB_TOKEN"]
                     g = Github(gh_token)
                     # Replace 'rkovath/backtest_with_upstox_data' with your actual username/repo
-                    repo = g.get_repo("rkovath/backtest_with_upstox_data") 
+                    repo = g.get_repo("rkovath-netizen/backtest_with_upstox_data") 
                     
                     file_path = f"data_outputs/{file_name}"
                     repo.create_file(
