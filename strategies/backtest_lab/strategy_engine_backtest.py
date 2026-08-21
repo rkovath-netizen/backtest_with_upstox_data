@@ -12,17 +12,27 @@ def get_premium_at_time(df, target_time):
     return past.iloc[-1]['close'] if not past.empty else 0.0
 
 # -----------------------------------------------------------------------------------------
-# 📊 HISTORICAL BACKTEST ENGINE (Original Pure Price Setup)
+# 📊 HISTORICAL BACKTEST ENGINE (Modular Risk & Day Filters)
 # -----------------------------------------------------------------------------------------
-def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token, sell_offset=2, buy_offset=4, 
-                                    require_color=False, require_expansion=False, require_rsi_sma=True, require_1h_sma=True, 
-                                    require_adx=True, adx_threshold=20.0, ltf="3min", max_concurrent_trades=3, 
+def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token, 
+                                    sell_offset=2, buy_offset=4, 
+                                    target_decay_pct=0.50, # 50% target default
+                                    sl_appreciation_pct=0.60, # 60% SL default (test with 0.40)
+                                    blocked_days=None, # List of days e.g. ['Thursday', 'Friday']
+                                    require_color=False, require_expansion=False, 
+                                    require_rsi_sma=True, require_1h_sma=True, 
+                                    require_1h_rsi=False, # NEW: 1H RSI Momentum Filter
+                                    require_adx=True, adx_threshold=20.0, 
+                                    ltf="3min", max_concurrent_trades=3, 
                                     progress_callback=None, log_func=print):
+    if blocked_days is None:
+        blocked_days = []
+        
     all_trades = []
     total_symbols = len(symbols)
     
     for sym_idx, symbol in enumerate(symbols):
-        log_func(f"\n========================================\n🚀 Processing {symbol} (LTF: {ltf})\n========================================")
+        log_func(f"\n========================================\n🚀 Processing {symbol} (LTF: {ltf} | Target: {target_decay_pct*100}% | SL: {sl_appreciation_pct*100}%)\n========================================")
         
         start_dt = datetime.combine(start_date, datetime.min.time())
         end_dt = datetime.combine(end_date, datetime.max.time())
@@ -34,6 +44,7 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
         # --- 1H Data Prep ---
         df_1h = spot_1m.set_index('timestamp').resample('1h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
         df_1h['SMA_20'] = ta.sma(df_1h['close'], length=20)
+        df_1h['RSI_14'] = ta.rsi(df_1h['close'], length=14)
         df_1h = df_1h.reset_index()
 
         # --- 15m Data Prep ---
@@ -62,12 +73,17 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
         entries = []
         
         # ==========================================
-        # 1. ENTRY LOGIC (Original Loose Conditions)
+        # 1. ENTRY LOGIC
         # ==========================================
         for j in range(1, len(df_ltf) - 1):
             c_time = df_ltf.loc[j, 'timestamp']
             if c_time < start_dt or c_time > end_dt: continue
 
+            # Configurable Day-of-Week Block
+            c_day_name = c_time.strftime('%A')
+            if c_day_name in blocked_days: continue
+
+            # Sensex Specific Exclusions
             if symbol == "SENSEX" and (c_time.weekday() == 4 or c_time.time() >= dt.time(13, 0)): continue
 
             matching_1h = df_1h[df_1h['timestamp'] <= c_time]
@@ -75,6 +91,8 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             if matching_1h.empty or matching_15m.empty: continue
             
             c_1h_close, c_1h_sma20 = matching_1h.iloc[-1]['close'], matching_1h.iloc[-1]['SMA_20']
+            c_1h_rsi = matching_1h.iloc[-1]['RSI_14']
+            
             curr_15m = matching_15m.iloc[-1]
             ema9_15, ema21_15, c_adx = curr_15m['EMA_9'], curr_15m['EMA_21'], curr_15m['ADX_14']
             
@@ -88,19 +106,22 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             is_bearish_trend = ema9_15 < ema21_15
             if not (is_bullish_trend or is_bearish_trend): continue
             
-            # Original Loose Bounce Logic
             bullish_retracement = is_bullish_trend and (c_low < c_ema9 or c_low < c_ema50) and (c_close > c_ema9 or c_close > c_ema50)
             bearish_retracement = is_bearish_trend and (c_high > c_ema9 or c_high > c_ema50) and (c_close < c_ema9 or c_close < c_ema50)
             
             if not (bullish_retracement or bearish_retracement): continue
             
-            # Original Filters
             color_ok = (c_close > c_open) if (require_color and bullish_retracement) else ((c_close < c_open) if require_color else True)
             expansion_ok = (c_body > avg_body) if require_expansion else True
             rsi_ok = (curr_15m['RSI_14'] > curr_15m['RSI_SMA_14']) if (require_rsi_sma and bullish_retracement) else ((curr_15m['RSI_14'] < curr_15m['RSI_SMA_14']) if require_rsi_sma else True)
             h1_ok = (c_1h_close > c_1h_sma20) if (require_1h_sma and bullish_retracement) else ((c_1h_close < c_1h_sma20) if require_1h_sma else True)
             
-            if not (color_ok and expansion_ok and rsi_ok and h1_ok): continue
+            # --- Configurable 1H RSI Alignment ---
+            h1_rsi_ok = True
+            if require_1h_rsi:
+                h1_rsi_ok = (c_1h_rsi > 50.0) if bullish_retracement else (c_1h_rsi < 50.0)
+            
+            if not (color_ok and expansion_ok and rsi_ok and h1_ok and h1_rsi_ok): continue
             
             trade_type = 'PE_SPREAD' if bullish_retracement else 'CE_SPREAD'
             entries.append({'time': df_ltf.loc[j+1, 'timestamp'], 'price': df_ltf.loc[j+1, 'open'], 'type': trade_type, 'ltf_idx': j+1})
@@ -152,7 +173,8 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
             initial_net_credit = leg1_entry - leg2_entry
             
             if initial_net_credit < 15.0: continue
-            capital_employed = abs(legs[0]['strike'] - legs[1]['strike']) * trade_lot_size
+            spread_width = abs(legs[0]['strike'] - legs[1]['strike'])
+            capital_employed = spread_width * trade_lot_size
 
             exit_time, exit_reason, exit_bar_step = df_ltf.iloc[-1]['timestamp'], "Data Ended", len(df_ltf) - 1
             max_hold_time = entry_time + timedelta(days=3)
@@ -176,12 +198,16 @@ def process_ema_rsi_guided_strategy(symbols, start_date, end_date, upstox_token,
                     elif trade_type == 'CE_SPREAD' and curr_spot_close > m15_row['ATR_Trailing_Short']:
                         exit_reason, exit_time, exit_bar_step = "15m Spot Close > ATR Trailing SL", curr_time, step; break
 
-                # C. Premium Decay/Appreciation Exits
+                # C. Premium Decay/Appreciation Exits (Configurable Percentages)
                 l1_curr, l2_curr = get_premium_at_time(leg_data[0]['df'], curr_time), get_premium_at_time(leg_data[1]['df'], curr_time)
                 current_pnl_per_qty = initial_net_credit - (l1_curr - l2_curr)
                 
-                if current_pnl_per_qty >= (0.50 * initial_net_credit): exit_reason, exit_time, exit_bar_step = "Target Hit (50% Premium Decay)", curr_time, step; break
-                elif current_pnl_per_qty <= (-0.60 * initial_net_credit): exit_reason, exit_time, exit_bar_step = "SL Hit (60% Premium Appreciation)", curr_time, step; break
+                if current_pnl_per_qty >= (target_decay_pct * initial_net_credit): 
+                    exit_reason, exit_time, exit_bar_step = f"Target Hit ({int(target_decay_pct*100)}% Premium Decay)", curr_time, step
+                    break
+                elif current_pnl_per_qty <= (-sl_appreciation_pct * initial_net_credit): 
+                    exit_reason, exit_time, exit_bar_step = f"SL Hit ({int(sl_appreciation_pct*100)}% Premium Appreciation)", curr_time, step
+                    break
 
             l1_final, l2_final = get_premium_at_time(leg_data[0]['df'], exit_time), get_premium_at_time(leg_data[1]['df'], exit_time)
             exit_pnl_abs = (initial_net_credit - (l1_final - l2_final)) * trade_lot_size
