@@ -4,8 +4,10 @@ import pandas as pd
 import datetime as dt
 from datetime import timedelta
 
-from strategies.backtest_lab.strategy_engine_backtest import process_ema_rsi_guided_strategy
+#from strategies.backtest_lab.strategy_engine_backtest import process_ema_rsi_guided_strategy
 #from strategies.backtest_lab.batch_optimizer import run_grid_search_optimization
+#from .batch_optimizer import run_grid_search_optimization
+from .strategy_engine_backtest import process_ema_rsi_guided_strategy
 from .batch_optimizer import run_grid_search_optimization
 # =========================================================================================
 # 💾 GITHUB AUTO-COMMIT & LOCAL PERSISTENCE HANDLER
