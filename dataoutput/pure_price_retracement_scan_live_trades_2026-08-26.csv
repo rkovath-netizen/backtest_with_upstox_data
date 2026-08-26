@@ -92,3 +92,4 @@ Timestamp (IST),Action,Symbol,Strategy,Spot Price,Net Premium,Sell Leg (ATM),Buy
 2026-08-26 10:35:15,EXIT,SENSEX,Bull Put Spread,77780.31,64.15,77800 PE @ ₹154.75,77600 PE @ ₹90.6,20,0.0,Spot < EMA (Bullish Failure)
 2026-08-26 10:35:26,ENTRY,SENSEX,Bull Put Spread,77780.31,64.15,77800 PE @ ₹154.75,77600 PE @ ₹90.6,20,0.0,Setup Detected
 2026-08-26 10:35:30,EXIT,SENSEX,Bull Put Spread,77780.31,62.7,77800 PE @ ₹154.75,77600 PE @ ₹90.6,20,29.0,Spot < EMA (Bullish Failure)
+2026-08-26 10:35:34,EXIT,SENSEX,Bull Put Spread,77780.31,62.7,77800 PE @ ₹154.75,77600 PE @ ₹90.6,20,29.0,Spot < EMA (Bullish Failure)
