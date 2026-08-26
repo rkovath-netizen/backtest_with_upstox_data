@@ -1,0 +1,2 @@
+Timestamp (IST),Action,Symbol,Strategy,Spot Price,Net Premium,Sell Leg (ATM),Buy Leg (OTM),Lot Size,Realized PnL (₹),Notes
+2026-08-26 10:04:13,ENTRY,SENSEX,Bull Put Spread,77911.59,57.2,77900 PE @ ₹137.05,77700 PE @ ₹79.85,20,0.0,Setup Detected
